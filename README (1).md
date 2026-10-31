@@ -63,7 +63,7 @@ Decision order: quarantined → HOLD · no quote → NEED SOURCING QUOTE · marg
 | `Sheet not updated: … refused access (403)` | The sheet isn't shared with the service account, or `GOOGLE_SHEET_ID` is a different sheet | Share the sheet with the `client_email` shown in the message as **Editor**; copy the ID between `/d/` and `/edit` |
 | `not found (404)` | Wrong `GOOGLE_SHEET_ID` | Copy it again from the sheet URL |
 | `Amazon lists: 0 ok · N blocked` | Amazon is blocking GitHub's servers | Run from your own computer (see "Run locally") or use fewer categories |
-| `parsed 0 items — layout change?` | Amazon changed its page layout | Parser update needed |
+| `parsed 0 items — layout change?` | Amazon page structure not recognised | The page is saved to `output/debug/` inside the run artifact. Send it over for a parser fix |
 
 If the sheet can't be opened, the run still fetches Amazon and saves everything as a downloadable **artifact** (`bazaar-radar-output`, on the run's page), then shows red so you notice.
 

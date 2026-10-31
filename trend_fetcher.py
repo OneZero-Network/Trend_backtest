@@ -270,10 +270,48 @@ def parse_prices(text):
         mrp = max(pm)          # unlabelled strike-through price; treated as MRP
     return min(pm), None, mrp
 
+def parse_recs_json(soup):
+    """Amazon list pages embed the full ranked list as JSON in data-client-recs-list
+    (only ~30 items are rendered as cards; Movers & Shakers may render none server-side).
+    → ordered list of {asin, rank, rank_now, rank_prev, pct_gain}."""
+    out, seen = [], set()
+    for div in soup.select("[data-client-recs-list]"):
+        try:
+            items = json.loads(div["data-client-recs-list"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        for it in items if isinstance(items, list) else []:
+            asin = str(it.get("id") or "")
+            if not re.fullmatch(r"[A-Z0-9]{10}", asin) or asin in seen:
+                continue
+            seen.add(asin)
+            md = it.get("metadataMap") or {}
+            num = lambda k: _num(str(md.get(k, "")).replace("%", "").strip("#")) if md.get(k) not in (None, "") else None
+            out.append({"asin": asin, "rank": int(num("render.zg.rank") or len(out) + 1),
+                        "rank_now": num("render.zg.bsms.currentSalesRank"),
+                        "rank_prev": num("render.zg.bsms.twentyFourHourOldSalesRank"),
+                        "pct_gain": num("render.zg.bsms.percentageChange")})
+    return out
+
+
+def _dump_debug(html, slug, list_type, pg):
+    """Save pages that parse to 0 items (max 8/run) → uploaded with the run artifact."""
+    try:
+        d = os.path.join(LOCAL_OUT_DIR, "debug")
+        os.makedirs(d, exist_ok=True)
+        if len(os.listdir(d)) < 8:
+            with open(os.path.join(d, f"{slug}_{list_type}_p{pg}.html"), "w", encoding="utf-8") as fh:
+                fh.write(html)
+    except Exception as exc:
+        log(f"  debug dump failed: {exc}", "DBG")
+
+
 def parse_list_page(html, list_type, slug):
     soup = BeautifulSoup(html, "html.parser")
     cards = soup.select("div#gridItemRoot") or soup.select("div.zg-grid-general-faceout") \
             or soup.select("li.zg-item-immersion")
+    if not cards:   # generic fallback: any container carrying a product ASIN
+        cards = [t for t in soup.select("[data-asin]") if re.fullmatch(r"[A-Z0-9]{10}", t.get("data-asin", ""))]
     rows = []
     for idx, card in enumerate(cards, 1):
         text = card.get_text(" ", strip=True)
@@ -331,6 +369,35 @@ def parse_list_page(html, list_type, slug):
             row["pct_gain"] = _num(pc.group(1)) if pc else None
             row["was_unranked"] = bool(mm and not mm.group(2))
         rows.append(row)
+
+    # merge the embedded JSON list: fills ranks/mover stats and adds items with no rendered card
+    recs = parse_recs_json(soup)
+    if recs:
+        by = {r["asin"]: r for r in rows}
+        alt = {}
+        for img in soup.find_all("img", alt=True):
+            a = img.find_parent("a", href=True)
+            m = _RX_ASIN.search(a["href"]) if a else None
+            if m and len(img["alt"]) > 3:
+                alt.setdefault(m.group(1), img["alt"].strip())
+        for it in recs:
+            r = by.get(it["asin"])
+            if r is None:
+                r = {"date": TODAY, "list": list_type, "category_slug": slug,
+                     "category": CATEGORIES.get(slug, slug), "rank": it["rank"], "asin": it["asin"],
+                     "title": alt.get(it["asin"], "")[:200], "price_inr": None, "price_max_inr": None,
+                     "mrp_inr": None, "rating": None, "reviews": None,
+                     "url": f"https://www.amazon.in/dp/{it['asin']}"}
+                rows.append(r); by[it["asin"]] = r
+            else:
+                r["rank"] = it["rank"]
+            if list_type == "movers":
+                for k in ("rank_now", "rank_prev", "pct_gain"):
+                    if r.get(k) is None and it.get(k) is not None:
+                        r[k] = int(it[k]) if k != "pct_gain" else it[k]
+                if "was_unranked" not in r or r["was_unranked"] is None:
+                    r["was_unranked"] = it.get("rank_prev") is None and it.get("rank_now") is not None
+        rows.sort(key=lambda r: r["rank"])
     return rows
 
 
@@ -353,6 +420,7 @@ def fetch_amazon_lists():
                     break
                 rows = parse_list_page(html, list_type, slug)
                 if not rows:
+                    _dump_debug(html, slug, list_type, pg)
                     stats["empty"] += 1
                     if pg == 1:
                         log(f"  [{slug}/{list_type}] page parsed 0 items — layout change?", "WARN")

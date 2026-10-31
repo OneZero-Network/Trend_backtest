@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Offline tests for trend_fetcher.py (fixtures, no network). Run: python test_fetcher.py"""
-import os, sys, shutil, tempfile
+import os, sys, json, shutil, tempfile
 from datetime import timedelta
 import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -18,6 +18,42 @@ check("variant range", tf.parse_prices("Kurti ₹449 - ₹899") == (449, 899, No
 check("labelled MRP", tf.parse_prices("₹999 M.R.P: ₹2,499") == (999, None, 2499))
 check("unlabelled strike price → MRP", tf.parse_prices("₹1,499 ₹3,999") == (1499, None, 3999))
 check("no price", tf.parse_prices("Currently unavailable") == (None, None, None))
+
+# ── embedded JSON list (data-client-recs-list): movers page with NO rendered cards
+import html as _h
+def recs(items):
+    return '<div class="p13n-desktop-grid" data-client-recs-list="' + _h.escape(json.dumps(items), quote=True) + '"></div>'
+mv = recs([{"id": "B0MOVER001", "metadataMap": {"render.zg.rank": "1", "render.zg.bsms.currentSalesRank": "45",
+            "render.zg.bsms.percentageChange": "2,350", "render.zg.bsms.twentyFourHourOldSalesRank": "1,103"}},
+           {"id": "B0MOVER002", "metadataMap": {"render.zg.rank": "2", "render.zg.bsms.currentSalesRank": "310",
+            "render.zg.bsms.percentageChange": "", "render.zg.bsms.twentyFourHourOldSalesRank": ""}}])
+mv += '<a href="/x/dp/B0MOVER001/ref"><img alt="Mini Neck Fan Rechargeable"></a>'
+rows = tf.parse_list_page(mv, "movers", "electronics")
+r1 = {r["asin"]: r for r in rows}
+check("movers page with only embedded JSON parses", len(rows) == 2, f"{len(rows)} rows")
+check("mover stats from JSON (rank 45 ← 1103, +2350%)", r1.get("B0MOVER001", {}).get("rank_now") == 45
+      and r1["B0MOVER001"]["rank_prev"] == 1103 and r1["B0MOVER001"]["pct_gain"] == 2350, str(r1.get("B0MOVER001")))
+check("title recovered from image alt", r1["B0MOVER001"]["title"] == "Mini Neck Fan Rechargeable")
+check("no previous rank → was_unranked", r1["B0MOVER002"]["was_unranked"] is True)
+import inspect
+src = inspect.getsource(tf)
+check("JSON parse uses only standard library (json) — no new dependency", "parse_recs_json" in src)
+# bestseller page: 2 rendered cards + JSON with 4 → 4 rows, card data kept, ranks from JSON
+bsh = (f'<div id="gridItemRoot"><span class="zg-bdg-text">#1</span><div data-asin="B0CARD0001"><a href="/x/dp/B0CARD0001">'
+       f'<img alt="Steel Bottle"></a><span>₹499</span></div></div>'
+       f'<div id="gridItemRoot"><span class="zg-bdg-text">#2</span><div data-asin="B0CARD0002"><a href="/x/dp/B0CARD0002">'
+       f'<img alt="Lunch Box"></a><span>₹349</span></div></div>'
+       + recs([{"id": a, "metadataMap": {"render.zg.rank": str(i + 1)}} for i, a in
+               enumerate(["B0CARD0001", "B0CARD0002", "B0LAZY0003", "B0LAZY0004"])]))
+rows = tf.parse_list_page(bsh, "bestsellers", "kitchen")
+check("lazy-loaded items added from JSON (2 cards + 2 hidden = 4)", [r["asin"] for r in rows] ==
+      ["B0CARD0001", "B0CARD0002", "B0LAZY0003", "B0LAZY0004"])
+check("card data (price) kept when JSON merged", rows[0]["price_inr"] == 499)
+# empty page is dumped for debugging
+tf.LOCAL_OUT_DIR = TMP
+tf._dump_debug("<html>weird</html>", "grocery", "new_releases", 1)
+check("0-item page saved to output/debug for diagnosis", os.path.exists(os.path.join(TMP, "debug", "grocery_new_releases_p1.html")))
+shutil.rmtree(os.path.join(TMP, "debug"))
 
 # ── product page
 PAGE = """<html><body><div id="centerCol">

@@ -41,7 +41,7 @@ COLS = [  # (key, header, kind)  kind: info=refreshed by fetcher · input=yours 
     ("ind_matches", "Comparable listings / suppliers", "info"),
     ("ind_conf", "Estimate confidence", "info"), ("ind_url", "IndiaMART search", "info"),
     ("search_words", "IndiaMART search words (optional override)", "input"),
-    ("sourcing", "Sourcing cost ex-GST (₹) — IndiaMART quote", "input"),
+    ("sourcing", "Sourcing cost ex-GST (₹) — best logged quote (or type one)", "default"),
     ("purchase_gst", "Purchase GST %", "default"), ("defect", "Defect %", "default"),
     ("moq", "MOQ (units)", "input"), ("ship", "Shipping per order (₹)", "default"),
     ("referral", "Referral fee %", "default"), ("closing", "Closing fee (₹)", "default"),
@@ -108,6 +108,9 @@ def _lookup(key, r):
 
 
 def default_formula(key, r):
+    if key == "sourcing":                       # best ★ quote from SUPPLIER_QUOTES, "" if none
+        import workbook_tabs
+        return workbook_tabs.best_quote_formula(f"$A{r}")
     if key == "ads":
         return f"=${L['price']}{r}*{_lookup('ads_pct', r)}"
     return "=" + _lookup(key, r)
@@ -147,11 +150,19 @@ def calc_formula(key, r):
     return f[key]
 
 
-_DEFAULT_RX = re.compile(r"^=\s*(\$?[A-Z]+\$?\d+\s*\*\s*)?IFERROR\(INDEX\(", re.I)
+_DEFAULT_RX = re.compile(r"^=\s*(\$?[A-Z]+\$?\d+\s*\*\s*)?IFERROR\((INDEX|SUMIFS)\(", re.I)
 
 
 def _is_default_formula(v):
     return isinstance(v, str) and bool(_DEFAULT_RX.match(v))
+
+
+def has_quote(r, quoted_asins=()):
+    """True if the row has a real sourcing cost: a typed number, or a logged ★ quote for its ASIN."""
+    v = r.get("sourcing")
+    if str(r.get("asin") or "") in quoted_asins:
+        return True
+    return v not in (None, "", "None") and not _is_default_formula(v)
 
 
 def assumptions_values():
@@ -207,7 +218,7 @@ def merge(existing_rows, signals, today=None, top_n=TOP_N, stale_days=STALE_DAYS
             by_asin[a] = new
     out = []
     for a, r in by_asin.items():
-        has_input = str(r.get("sourcing") or "").strip() not in ("", "None")
+        has_input = has_quote(r)
         try:
             age = (datetime.strptime(today, "%Y-%m-%d") - datetime.strptime(str(r.get("last_seen"))[:10], "%Y-%m-%d")).days
         except ValueError:
@@ -215,9 +226,9 @@ def merge(existing_rows, signals, today=None, top_n=TOP_N, stale_days=STALE_DAYS
         if a not in seen and not has_input and age > stale_days:
             continue
         out.append(r)
-    out.sort(key=lambda r: (str(r.get("sourcing") or "") == "", -_num(r.get("trend_score")),
+    out.sort(key=lambda r: (not has_quote(r), -_num(r.get("trend_score")),
                             -_num(r.get("bought"))))
-    quoted = [r for r in out if str(r.get("sourcing") or "").strip() not in ("", "None")]
+    quoted = [r for r in out if has_quote(r)]
     unquoted = [r for r in out if r not in quoted][:MAX_UNQUOTED]
     return quoted + unquoted + manual
 
@@ -247,12 +258,22 @@ def render(rows):
     return out
 
 
+# Previous header names → key. A renamed header must never orphan data you typed under the old name.
+HEADER_ALIASES = {
+    "Sourcing cost ex-GST (₹) — IndiaMART quote": "sourcing",
+}
+
+
 def parse(values):
     """2D list (as read back, formulas as strings) → list of row dicts keyed by our keys."""
     if not values or len(values) < 2:
         return []
     hdr = values[0]
     idx = {h: i for i, h in enumerate(hdr)}
+    by_key = {k: h for k, h, _ in COLS}
+    for old, key in HEADER_ALIASES.items():          # old header present, new one absent → read the old column
+        if old in idx and by_key[key] not in idx:
+            idx[by_key[key]] = idx[old]
     rows = []
     for line in values[1:]:
         if not any(str(x).strip() for x in line):
@@ -326,6 +347,8 @@ def write_xlsx(path, rows, keep_sheets_from=None):
     else:
         wb = openpyxl.Workbook()
         wb.remove(wb.active)
+    import workbook_tabs
+    workbook_tabs.ensure_xlsx(wb)                  # SUPPLIER_QUOTES + FLIP_TRACKER, created once
     if ASSUMP_TAB not in wb.sheetnames:            # written once; never overwritten
         wa = wb.create_sheet(ASSUMP_TAB)
         for line in assumptions_values():
@@ -358,6 +381,8 @@ def update_xlsx(path, signals, today=None, refresh=None):
 # ── Google Sheets backend ─────────────────────────────────────────────
 def update_gsheet(wb, signals, today=None, refresh=None):
     import gspread
+    import workbook_tabs
+    workbook_tabs.ensure_gsheet(wb)
     try:
         wb.worksheet(ASSUMP_TAB)
     except gspread.WorksheetNotFound:

@@ -98,6 +98,43 @@ Limits: IndiaMART has no public product API and its terms restrict scraping, so 
 - **Product pages hit captchas** (5 of 30 on a second same-day run): an extra 4–7 s pause between product pages. Avoid several manual runs on the same day.
 - Regression tests now use trimmed copies of the real pages in `tests_fixtures/`.
 
+## v1.7: weekly affiliate picks = the model's forward test (`affiliate.yml`, Sundays)
+**Why:** the trend score has never been validated (the backtest was never run). Every published pick is a dated prediction, so tracking picks against **random products from the same category on the same day** validates the model for free while the channel earns.
+
+**What it does each Sunday** (only after ≥ 7 days of history):
+1. Picks the top 8 actionable products, at most 2 per category. Discount-driven and quarantined products are excluded; seasonal products are allowed, since there's no stock risk for affiliates, but labelled.
+2. Records **3 random same-category baselines per pick** (`PICKS` tab, deterministic per day so they can't be re-drawn).
+3. Posts to your channel (`AFFILIATE_CHAT_ID`), or sends you a **draft** if it isn't set. Links carry your `AFFILIATE_TAG`. **No prices** (Associates rules restrict showing prices not from Amazon's API), and the disclosure line is always included.
+
+**Daily:** the fetcher fills each pick's and baseline's rank at +7/14/28 days. `PICK_SCORECARD` shows pick hit rate vs random.
+- **Hit (fixed now, before any data):** still in the category top 100 **and** rank ≤ rank on the pick date.
+- Days the category wasn't fetched count as **pending**, not misses.
+- The verdict uses the **14-day** horizon only and refuses to judge before 40 picks are resolved (about 5 weeks).
+
+**Secrets to add:** `AFFILIATE_TAG` (your Associates tracking ID) and, optionally, `AFFILIATE_CHAT_ID` (a public channel the bot is an admin of).
+**Read the Amazon Associates Operating Agreement before posting.** Data obtained by scraping, price display and link placement all carry account risk. Posts are deliberately conservative, but compliance is your responsibility.
+
+## v1.9: tools for micro-flipping and the seller brief
+**SUPPLIER_QUOTES tab** (created once, never overwritten): log 3+ quotes per product with up to 3 quantity tiers, GST %, sample received and quality (1–5), certificate, lead time. It picks the price at your **test quantity** (cell B3, default 50), warns when MOQ is above it, and marks the **★ best** quote, **never one whose sample you rated below 3**. The ★ price flows into **CALCULATOR → Sourcing cost** automatically; typing a number there still overrides it. Products with a logged quote are skipped by the IndiaMART sourcing run.
+
+**FLIP_TRACKER tab** (created once): one row per test batch. Enter what actually happened (units bought, delivered, RTO, returns, damaged, fees, shipping incl. RTO, ads, rating). It calculates sell-through, revenue, GST payable (output − input credit), **real net profit and margin**, RTO % and return %, then gives a verdict using rules **you fix at the top of the tab before buying**:
+- before day 30 → RUNNING
+- ≥ 60% sold + ≥ 10% real margin + rating ≥ 4 → **SCALE — reorder 2×**
+- < 30% sold, or a loss → **KILL — liquidate at cost** (a fast seller at a loss is a kill)
+- otherwise → **ITERATE — change one thing and rerun**
+
+**Weekly seller brief** (`BR_MODE=brief`, runs after the affiliate picks): a one-page HTML file sent to the **admin** chat as a document, with track record first, up to 5 rising products and their reasons, category heat, seasonal watch, method and limits, and a closing **"would you pay, and how much?"** question. Forward it yourself to 20–30 sellers: their answers are the Data-as-a-Service demand test. It has no prices and no bulk data dumps.
+
+Header renames are handled: quotes typed under an old column name are kept (a bug caught while upgrading the workbook).
+
+## Two Telegram chats
+| Secret | Who | Receives |
+|---|---|---|
+| `TELEGRAM_CHAT_ID` | **Admin** (private group) | Daily digest, scores, quarantine, compliance and seasonal flags, calculator and IndiaMART estimates, state trends, forward-test scorecard, drafts, all errors and failure alerts |
+| `AFFILIATE_CHAT_ID` | **Public channel** | Weekly only: a header with the disclosure + one message per product (title, "Climbed #X → #Y", tagged link, #ad). Nothing else, ever |
+
+If both secrets hold the **same** ID, the weekly job refuses to post publicly and warns the admin chat. Leave `AFFILIATE_CHAT_ID` unset to receive public posts as drafts in the admin chat first.
+
 ## Troubleshooting
 | Telegram / log says | Meaning | Fix |
 |---|---|---|

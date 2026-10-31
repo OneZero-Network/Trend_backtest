@@ -35,7 +35,7 @@
 import os, re, sys, json, math, time, random, traceback, html as _html
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from discount_rule import discount_status            # shared with backtest — one rule
-import calculator, compliance, youtube_check, sourcing
+import calculator, compliance, youtube_check, sourcing, picks, brief
 from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree as ET
 
@@ -120,8 +120,13 @@ YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 BR_YT_TOP_N     = int(os.environ.get("BR_YT_TOP_N", "15"))       # ≈101 quota units each; free quota 10,000/day
 # State trends run in their own weekly workflow (BR_MODE=states), not in the daily run:
 # ~20 rate-limited Google calls would slow the daily run and risk blocking rising-queries.
-BR_MODE         = os.environ.get("BR_MODE") or "daily"          # daily | states | sourcing
+BR_MODE         = os.environ.get("BR_MODE") or "daily"          # daily | states | sourcing | affiliate | brief
 BR_SOURCING_TOP_N   = int(os.environ.get("BR_SOURCING_TOP_N") or "20")     # products searched per run
+AFFILIATE_TAG     = os.environ.get("AFFILIATE_TAG") or ""         # your Amazon Associates tag, e.g. name-21
+AFFILIATE_CHAT_ID = os.environ.get("AFFILIATE_CHAT_ID") or ""     # PUBLIC channel; drafts go to your private chat if unset
+BR_AFF_TOP_N      = int(os.environ.get("BR_AFF_TOP_N") or "8")
+BR_AFF_MIN_DAYS   = int(os.environ.get("BR_AFF_MIN_DAYS") or "7")
+AFFILIATE_POST_GAP_SEC = 3.0
 BR_SOURCING_RECHECK = int(os.environ.get("BR_SOURCING_RECHECK_DAYS") or "7")
 BR_STATE_TRENDS = os.environ.get("BR_STATE_TRENDS", "0") == "1" or BR_MODE == "states"
 # Discount penalty — MUST match backtest/config.py (DISCOUNT_*); test_fetcher.py enforces it.
@@ -1001,6 +1006,97 @@ def main_states():
                      f"rising on {r['rising_keywords']}")
     send_telegram("\n".join(lines))
 
+def main_affiliate():
+    """Weekly: choose picks, record same-category random baselines, draft the channel post."""
+    global TELEGRAM_CHAT_ID
+    log(f"🔍 BAZAAR RADAR — affiliate picks · {TODAY}")
+    store = Store()
+    hist = store.read(SHEET_HISTORY)
+    n_days = hist["date"].nunique() if not hist.empty else 0
+    if n_days < BR_AFF_MIN_DAYS:
+        msg = f"🔍 Affiliate picks: {n_days}/{BR_AFF_MIN_DAYS} days of history — no picks yet (day-1 scores are ties)."
+        log(msg); send_telegram(_esc(msg)); return
+    for c in ("rank",):
+        hist[c] = pd.to_numeric(hist[c], errors="coerce")
+    sig = store.read("TREND_SIGNALS")
+    last = hist["date"].max()
+    chosen = picks.select_picks(sig, n=BR_AFF_TOP_N)
+    if chosen.empty:
+        send_telegram("🔍 Affiliate picks: no eligible products this week."); return
+    trk = store.read("PICKS")
+    if not trk.empty and (trk["pick_date"] == last).any():
+        log("Picks already recorded for this date — not duplicating"); return
+    rows = picks.make_rows(chosen, hist, last)
+    trk = pd.concat([trk, rows.astype(str)], ignore_index=True) if not trk.empty else rows
+    store.write("PICKS", trk)
+    sc = picks.scorecard(picks.update_tracking(trk, hist)) if not trk.empty else pd.DataFrame()
+    line = picks.verdict(sc) if not sc.empty else ""
+    msgs = picks.post_messages(chosen, hist, AFFILIATE_TAG, last, cat_names=CATEGORIES,
+                               week_label=f"week of {last}")
+    store.write("AFFILIATE_POST", pd.DataFrame({"message": msgs}))
+    public_ok = bool(AFFILIATE_CHAT_ID) and AFFILIATE_CHAT_ID.strip() != str(TELEGRAM_CHAT_ID).strip()
+    if AFFILIATE_CHAT_ID and not public_ok:
+        send_telegram("⚠️ AFFILIATE_CHAT_ID is the SAME as TELEGRAM_CHAT_ID. Nothing was posted publicly — "
+                      "the admin chat receives errors, margins and sourcing data, so the public channel must be a "
+                      "different chat. Showing a draft instead.")
+    if public_ok:
+        own, TELEGRAM_CHAT_ID = TELEGRAM_CHAT_ID, AFFILIATE_CHAT_ID
+        try:
+            for m in msgs:                      # one message per product, like deal channels
+                send_telegram(m)
+                time.sleep(AFFILIATE_POST_GAP_SEC)   # stay well under Telegram's channel rate limit
+        finally:
+            TELEGRAM_CHAT_ID = own
+        send_telegram(f"🔍 Posted {len(msgs) - 1} picks to the channel. {_esc(line)}")
+    else:
+        send_telegram("🔍 <b>DRAFT</b> — set AFFILIATE_CHAT_ID to auto-post. Preview of the channel messages:")
+        for m in msgs:
+            send_telegram(m)
+        if line:
+            send_telegram(_esc(line))
+    if not AFFILIATE_TAG:
+        send_telegram("⚠️ AFFILIATE_TAG not set — links carry no Associates tag, so they earn nothing.")
+
+
+def send_telegram_document(path, caption=""):
+    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+        return
+    try:
+        with open(path, "rb") as fh:
+            r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
+                              data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
+                              files={"document": (os.path.basename(path), fh, "text/html")}, timeout=60)
+        if r.status_code != 200:
+            log(f"Telegram document HTTP {r.status_code}: {r.text[:200]}", "WARN")
+    except Exception as exc:
+        log_tb("Telegram document", exc)
+
+
+def main_brief():
+    """Weekly B2B sample brief → HTML file to the ADMIN chat (you forward it to sellers yourself)."""
+    log(f"📰 BAZAAR RADAR — weekly brief · {TODAY}")
+    store = Store()
+    hist = store.read(SHEET_HISTORY)
+    if hist.empty or hist["date"].nunique() < BR_AFF_MIN_DAYS:
+        send_telegram(f"📰 Brief: {hist['date'].nunique() if not hist.empty else 0}/{BR_AFF_MIN_DAYS} days of history — skipped.")
+        return
+    last = hist["date"].max()
+    sig, heat, trk = store.read("TREND_SIGNALS"), store.read("CATEGORY_HEAT"), store.read("PICKS")
+    line, weeks = "", 0
+    if not trk.empty:
+        trk = picks.update_tracking(trk, hist)
+        line = picks.verdict(picks.scorecard(trk))
+        weeks = trk["pick_date"].nunique()
+    page, text = brief.build(sig, heat, line, hist, last, picks, CATEGORIES, weeks)
+    os.makedirs(LOCAL_OUT_DIR, exist_ok=True)
+    path = os.path.join(LOCAL_OUT_DIR, f"trend_brief_{last}.html")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(page)
+    send_telegram_document(path, "📰 Weekly brief (sample for sellers). Forward it to 20–30 sellers and "
+                                 "note who replies 'yes' and at what price — that is the demand test.")
+    log(f"Brief written → {path}")
+
+
 def main_sourcing():
     """After the daily run: IndiaMART price discovery for calculator rows still waiting for a quote.
     Fills INDICATIVE columns only — never your quote cell."""
@@ -1013,8 +1109,9 @@ def main_sourcing():
     if not hist.empty and "date" in hist:
         cutoff = (pd.Timestamp(TODAY) - timedelta(days=BR_SOURCING_RECHECK)).strftime("%Y-%m-%d")
         recent = set(hist.loc[hist["date"] >= cutoff, "asin"])
-    todo = [r for r in rows if r.get("asin") and str(r.get("sourcing") or "").strip() in ("", "None")
-            and r["asin"] not in recent]
+    import workbook_tabs
+    quoted = workbook_tabs.quoted_asins(store.wb, os.path.join(LOCAL_OUT_DIR, "CALCULATOR.xlsx"))
+    todo = [r for r in rows if r.get("asin") and not calculator.has_quote(r, quoted) and r["asin"] not in recent]
     # seasonal and quarantined rows last — least likely to be bought
     todo.sort(key=lambda r: (str(r.get("seasonal", "")).startswith("SEASONAL"),
                              "Quarantined" in str(r.get("signal", "")), -calculator._num(r.get("trend_score"))))
@@ -1076,6 +1173,10 @@ def main_sourcing():
 def main():
     if BR_MODE == "sourcing":
         return main_sourcing()
+    if BR_MODE == "affiliate":
+        return main_affiliate()
+    if BR_MODE == "brief":
+        return main_brief()
     if BR_MODE == "states":
         return main_states()
     log("=" * 55)
@@ -1100,6 +1201,14 @@ def main():
     try:
         hist = update_history(store.read(SHEET_HISTORY), frames)
         written[SHEET_HISTORY] = store.write(SHEET_HISTORY, hist)
+        try:                                     # forward test: resolve pick/baseline ranks daily
+            trk = store.read("PICKS")
+            if not trk.empty:
+                trk = picks.update_tracking(trk, hist)
+                written["PICKS"] = store.write("PICKS", trk)
+                written["PICK_SCORECARD"] = store.write("PICK_SCORECARD", picks.scorecard(trk))
+        except Exception as exc:
+            log_tb("pick tracking", exc)
         signals = compute_signals(hist, frames)
         heat = category_heat(signals)
         written["TREND_SIGNALS"] = store.write("TREND_SIGNALS", signals)

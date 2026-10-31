@@ -86,7 +86,7 @@ rows = {r["asin"]: r for r in C.read_xlsx(calc)}
 check("row with your quote NOT searched", not any("lunch" in c for c in calls), str(calls))
 check("quote cell untouched", rows["B0QUOTED01"]["sourcing"] == 150)
 check("indicative cost filled (not the quote cell)", rows["B0LIGHTS01"]["ind_cost"] == 110
-      and rows["B0LIGHTS01"]["sourcing"] in ("", None), str({k: rows["B0LIGHTS01"][k] for k in ("ind_cost", "ind_conf", "sourcing")}))
+      and not C.has_quote(rows["B0LIGHTS01"]), str({k: rows["B0LIGHTS01"][k] for k in ("ind_cost", "ind_conf", "sourcing")}))
 check("no-match product: confidence 'none', no cost", rows["B0NOMATCH1"]["ind_cost"] in ("", None)
       and "none" in str(rows["B0NOMATCH1"]["ind_conf"]))
 check("unparsed IndiaMART page saved for diagnosis", glob.glob(os.path.join(TMP, "debug", "indiamart_B0NOMATCH1*")))

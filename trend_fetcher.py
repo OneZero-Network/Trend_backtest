@@ -129,6 +129,10 @@ AFFILIATE_CHAT_ID = os.environ.get("AFFILIATE_CHAT_ID") or ""     # PUBLIC chann
 BR_AFF_TOP_N      = int(os.environ.get("BR_AFF_TOP_N") or "8")
 BR_AFF_MIN_DAYS   = int(os.environ.get("BR_AFF_MIN_DAYS") or "7")
 AFFILIATE_POST_GAP_SEC = 3.0
+# Optional X auto-posting (paid, pay-per-use). Leave unset → you get one-tap "Post on X" buttons instead.
+X_CREDS = {k: os.environ.get(v) or "" for k, v in (("api_key", "X_API_KEY"), ("api_secret", "X_API_SECRET"),
+           ("access_token", "X_ACCESS_TOKEN"), ("access_secret", "X_ACCESS_SECRET"))}
+X_MAX_POSTS_PER_RUN = int(os.environ.get("X_MAX_POSTS_PER_RUN") or "8")    # your spend cap per week
 BR_SOURCING_RECHECK = int(os.environ.get("BR_SOURCING_RECHECK_DAYS") or "7")
 BR_STATE_TRENDS = os.environ.get("BR_STATE_TRENDS", "0") == "1" or BR_MODE == "states"
 # Discount penalty — MUST match backtest/config.py (DISCOUNT_*); test_fetcher.py enforces it.
@@ -1065,6 +1069,20 @@ def main_affiliate():
             send_telegram(m)
         if line:
             send_telegram(_esc(line))
+    # ── share kit for X + WhatsApp (admin chat only) and optional paid X auto-posting
+    kit = picks.share_kit(chosen, hist, AFFILIATE_TAG, last, cat_names=CATEGORIES)
+    store.write("SHARE_KIT", pd.DataFrame(kit))
+    x_auto = all(X_CREDS.values())
+    send_telegram("📣 <b>Share kit</b> — tap to open X / WhatsApp with the post pre-written, then pick your "
+                  "community or channel." + (" (X is auto-posted this week.)" if x_auto else ""))
+    for i, k in enumerate(kit, 1):
+        send_telegram(picks.kit_message(i, k))
+    if x_auto:
+        res = picks.post_to_x(kit, X_CREDS, X_MAX_POSTS_PER_RUN)
+        ok_n = sum(1 for _, t in res if t and not t.startswith("ERROR"))
+        errs = [t for _, t in res if t.startswith("ERROR")]
+        send_telegram(f"𝕏 Auto-posted {ok_n}/{len(res)} (cap {X_MAX_POSTS_PER_RUN}/week)."
+                      + (f"\n⚠️ {_esc(errs[0])}" if errs else ""))
     if not AFFILIATE_TAG:
         send_telegram("⚠️ AFFILIATE_TAG not set — links carry no Associates tag, so they earn nothing.")
 

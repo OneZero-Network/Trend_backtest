@@ -63,6 +63,32 @@ check("seasonal line on seasonal pick", "📅 Seasonal: Diwali" in M[2])
 newin = P.trend_facts("KIT0000010", "kitchen", H, day(0))
 check("first day in list → 'New in the top 100' wording", "New in the" in P.trend_line(newin, "Home & Kitchen"))
 
+# ── share kit (X + WhatsApp)
+from urllib.parse import unquote
+long = ch2.copy(); long.loc[long.asin == "KIT0000010", "title"] = "Milton " + "Super Insulated Steel Lunch Box " * 12
+K = P.share_kit(long, H, "mytag-21", day(8), {"kitchen": "Home & Kitchen", "toys": "Toys & Games"})
+check("X text ≤ 280 even with a very long title (links count 23)", all(P.x_weight(k["x_text"]) <= 280 for k in K),
+      str([P.x_weight(k["x_text"]) for k in K]))
+check("X text keeps the reason, tagged link and #ad", all("📈" in k["x_text"] and "?tag=mytag-21" in k["x_text"]
+      and "#ad" in k["x_text"] for k in K))
+check("WhatsApp text: *bold* title, link, #ad", K[0]["wa_text"].startswith("*") and "?tag=mytag-21" in K[0]["wa_text"]
+      and "#ad" in K[0]["wa_text"])
+check("one-tap links decode back to exactly the post", unquote(K[0]["x_intent"].split("text=", 1)[1]) == K[0]["x_text"]
+      and unquote(K[0]["wa_share"].split("text=", 1)[1]) == K[0]["wa_text"])
+check("no prices in X or WhatsApp text", all("₹" not in k["x_text"] + k["wa_text"] for k in K))
+class FakeX:
+    def __init__(s, fail_at=None): s.n, s.fail_at = 0, fail_at
+    def create_tweet(s, text):
+        s.n += 1
+        if s.fail_at and s.n >= s.fail_at:
+            raise Exception("402 Payment Required: add credits")
+        return type("R", (), {"data": {"id": f"t{s.n}"}})()
+kit8 = K * 4
+fx = FakeX(); res = P.post_to_x(kit8, {}, 3, client=fx)
+check("X auto-post respects the spend cap", fx.n == 3 and all(t.startswith("t") for _, t in res))
+fx = FakeX(fail_at=2); res = P.post_to_x(kit8, {}, 8, client=fx)
+check("X billing error (402) stops posting immediately", fx.n == 2 and res[-1][1].startswith("ERROR"), str(res))
+
 R = P.make_rows(ch, H, day(0))
 picks_r, base_r = R[R.role == "pick"], R[R.role == "baseline"]
 check("3 random baselines per pick", len(base_r) == 3 * len(picks_r), f"{len(picks_r)} picks, {len(base_r)} baselines")
@@ -93,7 +119,7 @@ tf.LOCAL_OUT_DIR = TMP; tf.AFFILIATE_POST_GAP_SEC = 0; tf.TODAY = day(29); tf.AF
 msgs = []; tf.send_telegram = msgs.append
 tf.main_affiliate()
 check("no channel set → DRAFT preview sent to your private chat, one message per product",
-      any("DRAFT" in m for m in msgs) and sum("?tag=" in m or "/dp/" in m for m in msgs) == 3)
+      any("DRAFT" in m for m in msgs) and sum("Amazon Associate link" in m and "wa.me" not in m for m in msgs) == 3)
 check("missing tag warned (links would earn nothing)", any("AFFILIATE_TAG not set" in m for m in msgs))
 pk = pd.read_csv(os.path.join(TMP, "PICKS.csv"))
 check("picks + baselines recorded with pick date", (pk.pick_date == day(29)).all() and set(pk.role) == {"pick", "baseline"})
@@ -118,6 +144,9 @@ tf.main_affiliate()
 pub = [t for c, t in sent if c == "PUBLIC"]; adm = [t for c, t in sent if c == "ADMIN"]
 check("public channel gets header + one message per product only", len(pub) == 1 + 3 and all("#ad" in t for t in pub), f"{len(pub)} public msgs")
 check("public channel never sees scorecard/admin text", not any("Forward test" in t or "Posted" in t or "⚠" in t for t in pub))
+check("share kit (one-tap X/WhatsApp buttons) goes to ADMIN only",
+      any("Share kit" in t for t in adm) and sum("wa.me/?text=" in t for t in adm) == 3
+      and not any("Share kit" in t or "wa.me" in t for t in pub))
 check("admin chat gets the confirmation + forward-test line", any("Posted 3 picks" in t for t in adm))
 check("after posting, admin chat id is restored", tf.TELEGRAM_CHAT_ID == "ADMIN")
 sent.clear(); os.remove(os.path.join(TMP, "PICKS.csv"))

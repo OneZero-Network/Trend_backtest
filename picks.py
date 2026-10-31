@@ -203,3 +203,91 @@ def post_messages(picks_df, hist, tag, today, cat_names=None, week_label=""):
         msgs.append(f"<b>{_h(str(p['title'])[:110])}</b>\n\n{trend_line(f, _h(cname))}{seas_line}\n\n"
                     f"{affiliate_link(p['asin'], tag)}\n\n<i>{SHORT_AD}</i>")
     return msgs
+
+
+# ── v1.11: X + WhatsApp share kit ─────────────────────────────────────
+from urllib.parse import quote as _q
+X_URL_LEN = 23          # X counts every link as 23 characters
+X_LIMIT = 280
+
+
+def _plain_line(f, cname):
+    now, then = f["rank_now"], f["rank_then"]
+    if now is None or pd.isna(now):
+        return f"Trending in {cname}"
+    if then is None or pd.isna(then):
+        return f"New in the {cname} top 100 (now #{int(now)})"
+    if then > now:
+        return f"Climbed #{int(then)} → #{int(now)} in {cname} this week"
+    return f"Holding #{int(now)} in {cname}"
+
+
+def x_weight(text):
+    """Approximate X length: links count 23; characters outside basic Latin count 2 (emoji, ₹, →)."""
+    import re
+    n = 0
+    for part in re.split(r"(https?://\S+)", text):
+        if part.startswith("http"):
+            n += X_URL_LEN
+        else:
+            n += sum(1 if ord(ch) < 0x1100 else 2 for ch in part)
+    return n
+
+
+def x_text(p, f, cname, tag):
+    link = affiliate_link(p["asin"], tag)
+    line = _plain_line(f, cname)
+    title = str(p["title"])
+    for cut in range(len(title), 10, -5):              # shorten the title until it fits
+        t = title[:cut].rstrip(" ,|-") + ("…" if cut < len(title) else "")
+        txt = f"{t}\n\n📈 {line}\n\n{link}\n\n#ad #AmazonFinds"
+        if x_weight(txt) <= X_LIMIT:
+            return txt
+    return f"📈 {line}\n\n{link}\n\n#ad"
+
+
+def wa_text(p, f, cname, tag):
+    """WhatsApp formatting: *bold*, plain link (WhatsApp shows the preview)."""
+    seas = str(p.get("seasonal", ""))
+    s = f"\n📅 Seasonal: {seas.replace('SEASONAL: ', '')}" if seas.startswith("SEASONAL") else ""
+    return (f"*{str(p['title'])[:110]}*\n\n📈 {_plain_line(f, cname)}{s}\n\n{affiliate_link(p['asin'], tag)}\n\n"
+            f"_#ad · Amazon Associate link_")
+
+
+def share_kit(picks_df, hist, tag, today, cat_names=None):
+    """→ list of dicts per pick: x_text, wa_text, x_intent (one-tap tweet), wa_share (one-tap WhatsApp)."""
+    out = []
+    for _, p in picks_df.iterrows():
+        cat = p.get("category_slug") or p.get("category")
+        f = trend_facts(p["asin"], cat, hist, today)
+        cname = (cat_names or {}).get(cat, cat)
+        xt, wt = x_text(p, f, cname, tag), wa_text(p, f, cname, tag)
+        out.append({"asin": p["asin"], "x_text": xt, "wa_text": wt,
+                    "x_intent": "https://twitter.com/intent/tweet?text=" + _q(xt),
+                    "wa_share": "https://wa.me/?text=" + _q(wt)})
+    return out
+
+
+def kit_message(i, k):
+    """Admin-chat message with one-tap buttons (Telegram HTML)."""
+    return (f"<b>{i}.</b> {_h(k['x_text'].split(chr(10))[0][:80])}\n"
+            f"<a href=\"{_h(k['x_intent'])}\">𝕏 Post on X</a>  ·  <a href=\"{_h(k['wa_share'])}\">🟢 Share on WhatsApp</a>")
+
+
+def post_to_x(kit, creds, max_posts, client=None):
+    """Optional paid auto-posting (X API pay-per-use). Returns [(asin, tweet_id or error)].
+    Posts at most max_posts — your spend cap."""
+    if client is None:
+        import tweepy
+        client = tweepy.Client(consumer_key=creds["api_key"], consumer_secret=creds["api_secret"],
+                               access_token=creds["access_token"], access_token_secret=creds["access_secret"])
+    done = []
+    for k in kit[:max_posts]:
+        try:
+            r = client.create_tweet(text=k["x_text"])
+            done.append((k["asin"], str((r.data or {}).get("id", ""))))
+        except Exception as exc:
+            done.append((k["asin"], f"ERROR {type(exc).__name__}: {str(exc)[:120]}"))
+            if "402" in str(exc) or "403" in str(exc):     # billing / permission problem → stop, don't burn calls
+                break
+    return done

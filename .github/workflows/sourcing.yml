@@ -1,0 +1,41 @@
+name: Bazaar Radar — IndiaMART sourcing estimates
+
+# Runs automatically after each successful daily fetch, or manually.
+# Separate job on purpose: if IndiaMART blocks or changes its pages, the Amazon run is unaffected.
+on:
+  workflow_run:
+    workflows: ["Bazaar Radar — India E-commerce Trend Fetcher"]
+    types: [completed]
+  workflow_dispatch:
+
+jobs:
+  sourcing:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          pip install requests pandas beautifulsoup4 gspread google-auth openpyxl
+          pip install curl_cffi || echo "curl_cffi failed — plain requests fallback"
+      - name: Run IndiaMART sourcing estimates
+        env:
+          BR_MODE:            sourcing
+          GOOGLE_CREDS_JSON:  ${{ secrets.GOOGLE_CREDS_JSON }}
+          GOOGLE_SHEET_ID:    ${{ secrets.GOOGLE_SHEET_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          BR_SOURCING_TOP_N:  ${{ vars.BR_SOURCING_TOP_N || '20' }}
+        run: python trend_fetcher.py
+      - name: Save run output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bazaar-radar-sourcing
+          path: output/
+          if-no-files-found: ignore
+          retention-days: 14

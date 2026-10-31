@@ -19,6 +19,39 @@ check("labelled MRP", tf.parse_prices("₹999 M.R.P: ₹2,499") == (999, None, 2
 check("unlabelled strike price → MRP", tf.parse_prices("₹1,499 ₹3,999") == (1499, None, 3999))
 check("no price", tf.parse_prices("Currently unavailable") == (None, None, None))
 
+# ── regressions from the first live run
+os.environ["BR_SEED_KEYWORDS"] = ""
+import importlib
+_tf2 = importlib.reload(tf)
+check("empty BR_SEED_KEYWORDS repo variable falls back to defaults", len(_tf2.SEED_KEYWORDS) == 10, str(_tf2.SEED_KEYWORDS[:3]))
+del os.environ["BR_SEED_KEYWORDS"]
+tf = importlib.reload(_tf2)
+os.environ.update({"BR_CATEGORIES": "electronics,beauty", "BR_OUTPUT_DIR": TMP, "BR_DETAIL_TOP_N": "5"})
+check("ISBN zero-padding", tf.norm_asin("8640378") == "0008640378" and tf.norm_asin("B0H8SSDB2Y") == "B0H8SSDB2Y")
+check("Telegram text escapes '<' from 'low (<7 days history)'", "&lt;7" in tf._esc("low (<7 days history)"))
+
+# ── REAL amazon.in page (Oct 31): Movers & Shakers empty on Amazon's side
+real = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests_fixtures",
+                         "amazon_in_movers_empty_2026-10-31.html"), encoding="utf-8").read()
+check("real empty Movers page: 0 rows, recognised as Amazon-side",
+      tf.parse_list_page(real, "movers", "electronics") == [] and bool(tf._AMAZON_EMPTY.search(real)))
+
+# ── own movers from bestseller history
+H = pd.DataFrame([
+    # date, list, category_slug, asin, rank
+    ("2026-10-30", "bestsellers", "kitchen", "CLIMB", 50), ("2026-10-31", "bestsellers", "kitchen", "CLIMB", 10),
+    ("2026-10-31", "bestsellers", "kitchen", "NEWIN", 5),                              # absent yesterday
+    ("2026-10-30", "bestsellers", "kitchen", "FALL", 10), ("2026-10-31", "bestsellers", "kitchen", "FALL", 20),
+    ("2026-10-31", "bestsellers", "toys", "TOYNEW", 1),                                # toys not fetched yesterday
+], columns=["date", "list", "category_slug", "asin", "rank"])
+om = tf.own_movers(H, "2026-10-31")
+check("own mover: 50→10 = +400%", abs(om.get("CLIMB", 0) - 400) < 1e-9, str(om.to_dict()))
+check("own mover: new top-100 entry at #5 treated as from #101 (+1920%)", abs(om.get("NEWIN", 0) - 1920) < 1e-9)
+check("own mover: falling product not a mover", "FALL" not in om)
+check("own mover: category missing yesterday is NOT compared (no fake movers)", "TOYNEW" not in om)
+check("own mover: gap > 2 days → no comparison",
+      tf.own_movers(H.replace({"2026-10-30": "2026-10-25"}), "2026-10-31").empty)
+
 # ── embedded JSON list (data-client-recs-list): movers page with NO rendered cards
 import html as _h
 def recs(items):
@@ -147,7 +180,7 @@ same = (tf.PRICE_DROP_PCT, tf.DISCOUNT_LOOKBACK_DAYS, tf.DISCOUNT_PENALTY, tf.DI
 check("live penalty == backtested penalty (same constants)", same)
 import calculator as CALC
 crow = {r["asin"]: r for r in CALC.read_xlsx(os.path.join(TMP, "CALCULATOR.xlsx"))}
-check("daily run fills CALCULATOR", "B0ORGANIC1" in crow, f"{len(crow)} rows")
+check("daily run fills CALCULATOR (after the 7-day history gate)", "B0ORGANIC1" in crow, f"{len(crow)} rows")
 check("compliance + competition columns on signals", {"compliance", "competition"} <= set(sig.columns)
       and sig["compliance"].astype(str).str.contains("REVIEW|NOT FLAGGED").all())
 check("details merged into signals", {"bought_past_month_min", "seller_offers", "discount_pct", "crowded_listing"} <= set(sig.columns))

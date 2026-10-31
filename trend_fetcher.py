@@ -35,7 +35,7 @@
 import os, re, sys, json, math, time, random, traceback, html as _html
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from discount_rule import discount_status            # shared with backtest — one rule
-import calculator, compliance, youtube_check
+import calculator, compliance, youtube_check, sourcing
 from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree as ET
 
@@ -95,7 +95,7 @@ DEFAULT_CATEGORIES = {
     "luggage":          "Bags & Luggage",
     "books":            "Books",
 }
-_cat_env = os.environ.get("BR_CATEGORIES", "").strip()
+_cat_env = (os.environ.get("BR_CATEGORIES") or "").strip()
 CATEGORIES = ({c.strip(): DEFAULT_CATEGORIES.get(c.strip(), c.strip())
                for c in _cat_env.split(",") if c.strip()} if _cat_env else DEFAULT_CATEGORIES)
 
@@ -105,18 +105,23 @@ LISTS = {
     "new_releases":      "https://www.amazon.in/gp/new-releases/{slug}/",
 }
 
-SEED_KEYWORDS = [k.strip() for k in os.environ.get(
-    "BR_SEED_KEYWORDS",
-    "smartwatch,air fryer,sunscreen,protein powder,earbuds,saree,kurti,sneakers,"
-    "skincare,robot vacuum").split(",") if k.strip()]
+_DEFAULT_SEEDS = ("smartwatch,air fryer,sunscreen,protein powder,earbuds,saree,kurti,sneakers,"
+                  "skincare,robot vacuum")
+# `or` (not a get() default): an EMPTY repo variable must also fall back to the defaults
+SEED_KEYWORDS = [k.strip() for k in (os.environ.get("BR_SEED_KEYWORDS") or _DEFAULT_SEEDS).split(",") if k.strip()]
 
 BR_DETAIL_TOP_N = int(os.environ.get("BR_DETAIL_TOP_N", "30"))   # product pages fetched per run
-BR_CALC_TOP_N   = int(os.environ.get("BR_CALC_TOP_N", "25"))     # actionable signals pushed to CALCULATOR
+BR_CALC_TOP_N   = int(os.environ.get("BR_CALC_TOP_N") or "25")     # actionable signals pushed to CALCULATOR
+# Day-1 scores are ties (no history) → don't ADD rows until enough history exists (rows already there still refresh)
+BR_CALC_MIN_DAYS = int(os.environ.get("BR_CALC_MIN_DAYS") or "7")
+BR_CALC_EXCLUDE = {c.strip() for c in (os.environ.get("BR_CALC_EXCLUDE") or "books").split(",") if c.strip()}
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 BR_YT_TOP_N     = int(os.environ.get("BR_YT_TOP_N", "15"))       # ≈101 quota units each; free quota 10,000/day
 # State trends run in their own weekly workflow (BR_MODE=states), not in the daily run:
 # ~20 rate-limited Google calls would slow the daily run and risk blocking rising-queries.
-BR_MODE         = os.environ.get("BR_MODE", "daily")          # daily | states
+BR_MODE         = os.environ.get("BR_MODE") or "daily"          # daily | states | sourcing
+BR_SOURCING_TOP_N   = int(os.environ.get("BR_SOURCING_TOP_N") or "20")     # products searched per run
+BR_SOURCING_RECHECK = int(os.environ.get("BR_SOURCING_RECHECK_DAYS") or "7")
 BR_STATE_TRENDS = os.environ.get("BR_STATE_TRENDS", "0") == "1" or BR_MODE == "states"
 # Discount penalty — MUST match backtest/config.py (DISCOUNT_*); test_fetcher.py enforces it.
 PRICE_DROP_PCT         = 15     # price at today vs max of prior LOOKBACK days, while climbing
@@ -165,6 +170,13 @@ def send_telegram(text):
                 data={"chat_id": TELEGRAM_CHAT_ID, "text": chunk,
                       "parse_mode": "HTML", "disable_web_page_preview": "true"},
                 timeout=20)
+            if r.status_code == 400 and "parse entities" in r.text:
+                # never lose the digest to one bad character: resend as plain text
+                plain = re.sub(r"<[^>]+>", "", chunk).replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+                r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                  data={"chat_id": TELEGRAM_CHAT_ID, "text": plain,
+                                        "disable_web_page_preview": "true"}, timeout=20)
+                log("Telegram: HTML rejected, sent as plain text", "WARN")
             if r.status_code != 200:
                 log(f"Telegram HTTP {r.status_code}: {r.text[:300]}", "WARN")
         except Exception as exc:
@@ -241,6 +253,12 @@ _RX_INT     = re.compile(r"[\d,]+")
 _RX_MOVER   = re.compile(r"Sales rank:\s*([\d,]+)\s*\((?:previously|was)\s*(?:unranked|([\d,]+))\)", re.I)
 _RX_PCT     = re.compile(r"([\d,]+)\s*%")
 
+def norm_asin(a):
+    """ISBN-style ASINs are all digits; a spreadsheet may have stripped leading zeros."""
+    a = str(a).strip().lstrip("'")
+    return a.zfill(10) if a.isdigit() and len(a) < 10 else a
+
+
 def _num(s):
     try:
         return float(str(s).replace(",", ""))
@@ -269,6 +287,37 @@ def parse_prices(text):
     if mrp is None and len(pm) >= 2 and max(pm) > min(pm):
         mrp = max(pm)          # unlabelled strike-through price; treated as MRP
     return min(pm), None, mrp
+
+_AMAZON_EMPTY = re.compile(r"(there are no (movers and shakers|new releases|best ?sellers|items) available"
+                           r"|no (movers and shakers|items) available in this category)", re.I)
+
+
+def own_movers(hist, today):
+    """Movers computed from OUR bestseller history (Amazon's Movers & Shakers can be empty):
+    1-day rank gain % = (rank_prev - rank_now) / rank_now × 100, same formula Amazon uses and the
+    same approximation the backtest uses. A product absent yesterday is treated as rank 101
+    (conservative: it was at least outside the top 100). Only categories fetched on BOTH days are
+    compared — otherwise a category that failed yesterday would make every product a fake mover."""
+    bs = hist[hist["list"] == "bestsellers"]
+    if bs.empty:
+        return pd.Series(dtype=float)
+    dates = sorted(d for d in bs["date"].unique() if d < today)
+    if not dates or (pd.Timestamp(today) - pd.Timestamp(dates[-1])).days > 2:
+        return pd.Series(dtype=float)
+    prev = dates[-1]
+    r = bs.groupby(["category_slug", "date", "asin"])["rank"].min()
+    cats_prev = set(bs.loc[bs["date"] == prev, "category_slug"])
+    cats_now = set(bs.loc[bs["date"] == today, "category_slug"])
+    out = {}
+    for cat in cats_prev & cats_now:
+        now = r.loc[(cat, today)]
+        before = r.loc[(cat, prev)]
+        for asin, rn in now.items():
+            rp = before.get(asin, 101)
+            if rn > 0 and rp > rn:
+                out[asin] = max(out.get(asin, 0), (rp - rn) / rn * 100)
+    return pd.Series(out, dtype=float)
+
 
 def parse_recs_json(soup):
     """Amazon list pages embed the full ranked list as JSON in data-client-recs-list
@@ -407,7 +456,7 @@ def fetch_amazon_lists():
     fetch_html(sess_box, "https://www.amazon.in/", retries=1)
 
     out = {k: [] for k in LISTS}
-    stats = {"ok": 0, "blocked": 0, "empty": 0}
+    stats = {"ok": 0, "blocked": 0, "empty": 0, "amazon_empty": 0}
     for slug in CATEGORIES:
         for list_type, tmpl in LISTS.items():
             base = tmpl.format(slug=slug)
@@ -420,6 +469,12 @@ def fetch_amazon_lists():
                     break
                 rows = parse_list_page(html, list_type, slug)
                 if not rows:
+                    if _AMAZON_EMPTY.search(html):
+                        # Amazon itself says the list is empty — not a parser problem
+                        stats["amazon_empty"] = stats.get("amazon_empty", 0) + 1
+                        if pg == 1:
+                            log(f"  [{slug}/{list_type}] Amazon shows no items for this list today (Amazon-side)")
+                        break
                     _dump_debug(html, slug, list_type, pg)
                     stats["empty"] += 1
                     if pg == 1:
@@ -434,7 +489,8 @@ def fetch_amazon_lists():
                 if r["asin"] not in seen:
                     seen.add(r["asin"]); out[list_type].append(r)
             log(f"  {slug:18} {list_type:13} {len(seen):3} items")
-    log(f"Amazon: {stats['ok']} lists OK · {stats['blocked']} blocked · {stats['empty']} empty pages")
+    log(f"Amazon: {stats['ok']} lists OK · {stats['blocked']} blocked · {stats['empty']} unparsed pages · "
+        f"{stats.get('amazon_empty', 0)} lists Amazon shows as empty")
     return {k: pd.DataFrame(v) for k, v in out.items()}, stats
 
 # ══════════════════════════════════════════════════════════════════════
@@ -547,7 +603,10 @@ def fetch_details(asins):
         if html is None:
             blocked += 1; continue
         try:
-            rows.append(parse_product_page(html, a))
+            d = parse_product_page(html, a)
+            rows.append(d)
+            if d.get("seller_offers") is None:
+                _dump_debug(html, f"product_{a}", "sellers_unparsed", 0)
         except Exception as exc:
             log_tb(f"parse product page {a}", exc)
     log(f"Product details: {len(rows)}/{len(asins)} parsed · {blocked} blocked")
@@ -688,6 +747,11 @@ def compute_signals(hist, frames):
         out = out.join(mvi, how="left")
     else:
         out["pct_gain"], out["was_unranked"] = None, False
+    out["mover_source"] = pd.to_numeric(out["pct_gain"], errors="coerce").notna().map({True: "amazon", False: "none"})
+    own = own_movers(hist, TODAY)
+    fill = out["mover_source"].eq("none") & out.index.isin(own.index)
+    out.loc[fill, "pct_gain"] = own.reindex(out.index)[fill]
+    out.loc[fill, "mover_source"] = "own_1d"
     pg = pd.to_numeric(out["pct_gain"], errors="coerce")
     out["mover"] = (pg.apply(lambda v: math.log10(v + 1) / 4 if pd.notna(v) else 0)).clip(0, 1)
     out.loc[out["was_unranked"].fillna(False).astype(bool), "mover"] = 1.0
@@ -775,10 +839,10 @@ def compute_signals(hist, frames):
     out["actionable"] = ~out["short_dip"].fillna(False).astype(bool)
     out["confidence"] = "low (<7 days history)" if ndays < 7 else ("medium" if ndays < 21 else "high")
 
-    cols = ["trend_score", "signal", "confidence", "category", "title", "price_inr", "rating",
+    cols = ["trend_score", "signal", "confidence", "category", "category_slug", "title", "price_inr", "rating",
             "reviews", "reviews_per_day", "review_growth_pct", "bs_rank_today", "bs_rank_ref",
             "bs_ref_date", "rank_change", "price_change_7d_pct", "discount_status", "discount_driven", "short_dip", "actionable",
-            "trend_score_unpenalized", "pct_gain", "lists_today", "days_on_list_14d",
+            "trend_score_unpenalized", "pct_gain", "mover_source", "lists_today", "days_on_list_14d",
             "first_seen", "momentum", "mover", "review_vel", "new_launch", "persistence", "breadth"]
     out = out.reset_index().rename(columns={"index": "asin"})
     out["url"] = "https://www.amazon.in/dp/" + out["asin"]
@@ -857,7 +921,10 @@ class Store:
             vals = self.wb.worksheet(tab).get_all_values()
         except gspread.WorksheetNotFound:
             return pd.DataFrame()
-        return pd.DataFrame(vals[1:], columns=vals[0]) if len(vals) > 1 else pd.DataFrame()
+        df = pd.DataFrame(vals[1:], columns=vals[0]) if len(vals) > 1 else pd.DataFrame()
+        if "asin" in df:
+            df["asin"] = df["asin"].map(norm_asin)
+        return df
 
     def update_calculator(self, signals_records, all_records=None):
         if self.wb is None:
@@ -878,7 +945,7 @@ class Store:
             ws = self.wb.add_worksheet(title=tab, rows=len(df) + 10, cols=len(df.columns) + 2)
         ws.clear()
         values = [df.columns.tolist()] + df.astype(object).where(df.notna(), "").astype(str).values.tolist()
-        ws.update(range_name="A1", values=values, value_input_option="USER_ENTERED")
+        ws.update(range_name="A1", values=values, value_input_option="RAW")   # RAW: keeps 0008640378 as text
         return len(df)
 
 # ══════════════════════════════════════════════════════════════════════
@@ -923,7 +990,81 @@ def main_states():
                      f"rising on {r['rising_keywords']}")
     send_telegram("\n".join(lines))
 
+def main_sourcing():
+    """After the daily run: IndiaMART price discovery for calculator rows still waiting for a quote.
+    Fills INDICATIVE columns only — never your quote cell."""
+    log(f"🏭 BAZAAR RADAR — IndiaMART sourcing estimates · {TODAY}")
+    store = Store()
+    rows = (calculator.read_xlsx(os.path.join(LOCAL_OUT_DIR, "CALCULATOR.xlsx")) if store.wb is None
+            else calculator.read_gsheet(store.wb))
+    hist = store.read("SOURCING_HISTORY")
+    recent = set()
+    if not hist.empty and "date" in hist:
+        cutoff = (pd.Timestamp(TODAY) - timedelta(days=BR_SOURCING_RECHECK)).strftime("%Y-%m-%d")
+        recent = set(hist.loc[hist["date"] >= cutoff, "asin"])
+    todo = [r for r in rows if r.get("asin") and str(r.get("sourcing") or "").strip() in ("", "None")
+            and r["asin"] not in recent]
+    # seasonal and quarantined rows last — least likely to be bought
+    todo.sort(key=lambda r: (str(r.get("seasonal", "")).startswith("SEASONAL"),
+                             "Quarantined" in str(r.get("signal", "")), -calculator._num(r.get("trend_score"))))
+    todo = todo[:BR_SOURCING_TOP_N]
+    log(f"Calculator rows: {len(rows)} · waiting for a quote & not checked in {BR_SOURCING_RECHECK}d: {len(todo)}")
+    if not todo:
+        send_telegram(f"🏭 Bazaar Radar sourcing — nothing to check today ({len(rows)} calculator rows).")
+        return
+    sess_box, details, updates, summary, blocked = [new_session()], [], [], [], 0
+    for r in todo:
+        q = sourcing.make_query(r.get("product", ""), r.get("search_words", ""))
+        if not q:
+            continue
+        url = sourcing.search_url(q)
+        html = fetch_html(sess_box, url, retries=2)
+        if html is None:
+            blocked += 1
+            continue
+        listings = sourcing.parse_search(html)
+        if not listings:
+            _dump_debug(html, f"indiamart_{r['asin']}", "search", 1)
+        est = sourcing.estimate(q, listings, amazon_price=calculator._num(r.get("price")) or None)
+        for d in est["detail"]:
+            details.append({"date": TODAY, "asin": r["asin"], "query": q, **{k: d.get(k, "") for k in
+                            ("title", "price", "unit", "per_piece", "unit_note", "relevance", "kept",
+                             "moq", "supplier", "city", "url")}})
+        rng = f"{est['ind_low']:,.0f}–{est['ind_high']:,.0f}" if est["ind_cost"] else ""
+        updates.append({"asin": r["asin"], "_sourcing_update": True, "ind_cost": est["ind_cost"] or "",
+                        "ind_range": rng, "ind_matches": f"{est['matches']} / {est['suppliers']} (of {est['listings_seen']} seen)",
+                        "ind_conf": est["confidence"], "ind_url": url})
+        summary.append((r, est))
+        log(f"  {r['asin']} '{q}': {est['matches']} comparable of {est['listings_seen']} → "
+            f"{est['ind_cost'] if est['ind_cost'] else '—'} ({est['confidence']})")
+    if blocked:
+        log(f"IndiaMART: {blocked}/{len(todo)} searches blocked", "WARN")
+    if details:
+        store.write("SOURCING", pd.DataFrame(details))
+    sh = pd.DataFrame([{"date": TODAY, "asin": u["asin"], "ind_cost": u["ind_cost"], "conf": u["ind_conf"]}
+                       for u in updates])
+    if not sh.empty:
+        sh = pd.concat([hist.astype(str), sh.astype(str)], ignore_index=True) if not hist.empty else sh
+        store.write("SOURCING_HISTORY", sh)
+    if updates:
+        store.update_calculator([], updates)
+    found = [(r, e) for r, e in summary if e["ind_cost"]]
+    lines = [f"🏭 <b>IndiaMART estimates</b> — {TODAY}",
+             f"Searched {len(summary)} · estimates {len(found)} · blocked {blocked}",
+             "<i>Listed prices, not quotes. Open the search, confirm product & unit, then request quotes.</i>"]
+    for r, e in sorted(found, key=lambda x: calculator._num(x[0].get("price")) / max(x[1]["ind_cost"], 1),
+                       reverse=True)[:8]:
+        price = calculator._num(r.get("price"))
+        lines.append(f"• {_esc(str(r.get('product', ''))[:55])}\n  Amazon ₹{price:,.0f} · IndiaMART ~₹{e['ind_cost']:,.0f} "
+                     f"({_esc(e['confidence'])}) · <a href=\"{sourcing.search_url(e['query'])}\">search</a>")
+    send_telegram("\n".join(lines))
+    if SHEET_PROBLEM:
+        sys.exit(3)
+
+
 def main():
+    if BR_MODE == "sourcing":
+        return main_sourcing()
     if BR_MODE == "states":
         return main_states()
     log("=" * 55)
@@ -978,6 +1119,7 @@ def main():
         if not signals.empty:
             signals["compliance"] = [compliance.compliance_flags(t, c) for t, c in
                                      zip(signals["title"], signals.get("category_slug", signals["category"]))]
+            signals["seasonal"] = [compliance.seasonal_flag(t) for t in signals["title"]]
             signals["competition"] = [compliance.competition_note(s_, b_) for s_, b_ in
                                       zip(signals.get("seller_offers", [None] * len(signals)),
                                           signals.get("bought_past_month_min", [None] * len(signals)))]
@@ -1012,6 +1154,12 @@ def main():
     try:
         if not signals.empty:
             act = signals[signals["actionable"].astype(bool)] if "actionable" in signals else signals
+            act = act[~act.get("category_slug", act["category"]).isin(BR_CALC_EXCLUDE)]
+            n_days = hist["date"].nunique() if "hist" in locals() and not hist.empty else 0
+            if n_days < BR_CALC_MIN_DAYS:
+                log(f"Calculator: {n_days}/{BR_CALC_MIN_DAYS} days of history — not adding new rows yet "
+                    f"(day-1 scores are ties); existing rows still refresh")
+                act = act.iloc[0:0]
             written["CALCULATOR"] = store.update_calculator(
                 act.where(act.notna(), None).to_dict("records")[:BR_CALC_TOP_N],
                 signals.where(signals.notna(), None).to_dict("records"))
@@ -1045,7 +1193,7 @@ def main():
     else:
         signals_act = signals
     if not signals_act.empty:
-        lines.append(f"Confidence: {signals_act['confidence'].iloc[0]}\n\n<b>Top trend signals</b>")
+        lines.append(f"Confidence: {_esc(signals_act['confidence'].iloc[0])}\n\n<b>Top trend signals</b>")
         for _, r in signals_act.head(10).iterrows():
             price = f"₹{int(r['price_inr']):,}" if pd.notna(r["price_inr"]) else ""
             extra = []
@@ -1057,13 +1205,15 @@ def main():
                 extra.append(f"{int(r['seller_offers'])} sellers")
             if str(r.get("compliance", "")).startswith("REVIEW"):
                 extra.append("⚖ certification check")
+            if str(r.get("seasonal", "")).startswith("SEASONAL"):
+                extra.append("📅 " + str(r["seasonal"]).replace("SEASONAL: ", "") + " — seasonal")
             if pd.notna(r.get("yt_verdict")) and r.get("yt_verdict"):
                 extra.append(f"▶ {r['yt_verdict']}")
-            lines.append(f"{r['signal']} · <b>{r['trend_score']:.0f}</b> · {_esc(r['category'])}\n"
+            lines.append(f"{_esc(r['signal'])} · <b>{r['trend_score']:.0f}</b> · {_esc(r['category'])}\n"
                          f"  <a href=\"{r['url']}\">{_esc(str(r['title'])[:70])}</a> {price} "
                          f"{_esc(' · '.join(extra))}")
     if not quarantined.empty:
-        lines.append(f"\n⏸ <b>Quarantined</b> ({len(quarantined)}): price dip <48h, decision in ≤2 days")
+        lines.append(f"\n⏸ <b>Quarantined</b> ({len(quarantined)}): price dip &lt;48h, decision in ≤2 days")
         for _, r in quarantined.head(3).iterrows():
             lines.append(f"• {_esc(str(r['title'])[:60])} · score {r['trend_score']:.0f} (held)")
     if not heat.empty:

@@ -26,11 +26,11 @@ CATEGORY_RULES = {
 
 KEYWORD_RULES = [
     (r"\b(charger|adapter|power ?bank|usb|led|lamp|bulb|speaker|earphone|earbud|headphone|"
-     r"smart ?watch|watch|keyboard|mouse|monitor|router|cctv|camera|trimmer|shaver|"
+     r"smart ?watch|fitness band|keyboard|mouse|monitor|router|cctv|camera|trimmer|shaver|"
      r"battery|batteries|inverter|extension|plug|socket|cable)\b", "BIS CRS (electronics) — check list"),
     (r"\b(toy|toys|puzzle|doll|blocks?|lego|rc car|kids?|children|baby|teether|rattle)\b",
      "BIS (toys QCO) — check"),
-    (r"\b(protein|whey|supplement|vitamin|capsule|gummies|tea|coffee|snack|masala|honey|"
+    (r"\b(protein|whey|supplement|vitamin|capsule|gummies|tea(?!\s*-?\s*lights?)|coffee|snack|masala|honey|"
      r"ghee|oil|spice|food|creatine|collagen)\b", "FSSAI — check"),
     (r"\b(serum|cream|lotion|shampoo|sunscreen|spf|face ?wash|lipstick|kajal|cosmetic|"
      r"hair ?oil|moisturi[sz]er|perfume|deo)\b", "CDSCO / cosmetics rules — check"),
@@ -74,3 +74,30 @@ def competition_note(sellers, bought_month=None):
         return (f"{s} seller(s) on a bestseller: likely brand-owned/private label — sell your own "
                 f"variant/listing, not this ASIN{dem}")
     return f"Moderate competition ({s} sellers){dem}"
+
+
+# ── SEASONAL demand: a trend that ends on a fixed date is the worst bulk buy ─────────
+# Sourcing lead time (quote → sample → bulk → Amazon inbound) is typically weeks. A Diwali
+# diya trending today will usually arrive after Diwali → dead stock until next year.
+SEASONAL = [
+    ("Diwali", r"\b(diwali|deepawali|diya|diyas|deepak|rangoli|laxmi pooja|lakshmi puja|dhanteras)\b"),
+    ("Halloween", r"\b(halloween|haunted|pumpkin costume|skeleton costume)\b"),
+    ("Christmas/New Year", r"\b(christmas|xmas|santa|new year|reindeer)\b"),
+    ("Holi", r"\b(holi|gulal|pichkari)\b"),
+    ("Rakhi", r"\b(rakhi|raksha bandhan)\b"),
+    ("Navratri/Durga Puja", r"\b(navratri|garba|dandiya|durga puja)\b"),
+    ("Ganesh Chaturthi", r"\b(ganesh chaturthi|ganpati)\b"),
+    ("Eid", r"\b(eid|ramadan|ramzan)\b"),
+    ("Karwa Chauth", r"\b(karwa chauth|karva chauth)\b"),
+    ("Valentine's", r"\b(valentine)\b"),
+    ("Monsoon", r"\b(raincoat|umbrella)\b"),
+    ("Summer", r"\b(air cooler|neck fan|ice pack)\b"),
+    ("Winter", r"\b(room heater|blower heater|thermal wear|electric blanket)\b"),
+]
+_SEAS = [(name, re.compile(rx, re.I)) for name, rx in SEASONAL]
+
+
+def seasonal_flag(title):
+    """→ '' or 'SEASONAL: Diwali, Halloween'. A flag means demand is tied to a date or season."""
+    hits = [name for name, rx in _SEAS if rx.search(title or "")]
+    return "SEASONAL: " + ", ".join(hits) if hits else ""

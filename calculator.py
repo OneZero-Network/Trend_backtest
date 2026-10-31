@@ -27,14 +27,20 @@ CALC_TAB = "CALCULATOR"
 ASSUMP_TAB = "CALC_ASSUMPTIONS"
 STALE_DAYS = 21
 TOP_N = 25
+MAX_UNQUOTED = 40     # rows waiting for a quote; beyond this, lowest-scoring are dropped (yours never)
 
 # ── column layout ─────────────────────────────────────────────────────
 COLS = [  # (key, header, kind)  kind: info=refreshed by fetcher · input=yours · default=formula you may override · calc=formula
     ("asin", "ASIN", "info"), ("product", "Product", "info"), ("category", "Category", "info"),
     ("trend_score", "Trend score", "info"), ("signal", "Signal", "info"),
     ("price", "Amazon price incl. GST (₹)", "info"), ("sellers", "Sellers on listing", "info"),
-    ("bought", "Bought/month (min)", "info"), ("compliance", "Compliance", "info"),
+    ("bought", "Bought/month (min)", "info"), ("compliance", "Compliance", "info"), ("seasonal", "Seasonal", "info"),
     ("competition", "Competition note", "info"), ("url", "Amazon URL", "info"),
+    ("ind_cost", "Indicative cost/pc (IndiaMART median, NOT a quote)", "info"),
+    ("ind_range", "IndiaMART range P25–P75 (₹)", "info"),
+    ("ind_matches", "Comparable listings / suppliers", "info"),
+    ("ind_conf", "Estimate confidence", "info"), ("ind_url", "IndiaMART search", "info"),
+    ("search_words", "IndiaMART search words (optional override)", "input"),
     ("sourcing", "Sourcing cost ex-GST (₹) — IndiaMART quote", "input"),
     ("purchase_gst", "Purchase GST %", "default"), ("defect", "Defect %", "default"),
     ("moq", "MOQ (units)", "input"), ("ship", "Shipping per order (₹)", "default"),
@@ -46,6 +52,8 @@ COLS = [  # (key, header, kind)  kind: info=refreshed by fetcher · input=yours 
     ("total", "Total cost per unit (₹)", "calc"), ("profit", "Net profit per unit (₹)", "calc"),
     ("margin", "Net margin %", "calc"), ("roi", "ROI on inventory %", "calc"),
     ("cash", "Cash needed for MOQ (₹)", "calc"), ("decision", "Decision", "calc"),
+    ("est_margin", "Est. margin % at indicative cost", "calc"),
+    ("est_verdict", "Triage (indicative — get a real quote)", "calc"),
     ("last_seen", "Last seen in signals", "info"), ("notes", "Your notes", "input"),
 ]
 KEYS = [c[0] for c in COLS]
@@ -120,12 +128,21 @@ def calc_formula(key, r):
         "margin": f'=IF(OR({blank},{c["price"]}=0),"",{c["profit"]}/{c["price"]})',
         "roi": f'=IF({blank},"",{c["profit"]}/({c["sourcing"]}*(1+{c["purchase_gst"]})))',
         "cash": f'=IF(OR({blank},{c["moq"]}=""),"",{c["moq"]}*{c["sourcing"]}*(1+{c["purchase_gst"]}))',
+        # indicative margin: same cost model with the IndiaMART median in place of your quote
+        "est_margin": (f'=IF(OR(NOT(ISNUMBER({c["ind_cost"]})),{c["price"]}=0),"",'
+                       f'({c["price"]}-({c["ind_cost"]}/(1-{c["defect"]})+{c["fees"]}'
+                       f'+{c["price"]}*{c["sale_gst"]}/(1+{c["sale_gst"]})-{th["itc"]}*{c["ind_cost"]}/(1-{c["defect"]})*{c["purchase_gst"]}'
+                       f'+{c["ship"]}+{c["rto_cost"]}+{c["ads"]}))/{c["price"]})'),
+        "est_verdict": (f'=IF({c["est_margin"]}="","",IF({c["est_margin"]}>={th["min_margin"]},'
+                        f'"Worth requesting a quote ("&{c["ind_conf"]}&" confidence)",'
+                        f'"Likely not viable at listed prices"))'),
         "decision": (f'=IF(ISNUMBER(SEARCH("Quarantined",{c["signal"]})),"HOLD — price-dip quarantine",'
+                     f'IF(LEFT({c["seasonal"]},8)="SEASONAL","HOLD — seasonal: only if stock lands ≥2 weeks before the event",'
                      f'IF({blank},"NEED SOURCING QUOTE",'
                      f'IF({c["margin"]}<{th["min_margin"]},"NO-GO (margin)",'
                      f'IF({c["roi"]}<{th["min_roi"]},"NO-GO (ROI)",'
                      f'IF(LEFT({c["compliance"]},6)="REVIEW","HOLD — certification check first",'
-                     f'"GO — still verify compliance & sample")))))'),
+                     f'"GO — still verify compliance & sample"))))))'),
     }
     return f[key]
 
@@ -147,12 +164,18 @@ def assumptions_values():
     return rows
 
 
+IND_KEYS = ("ind_cost", "ind_range", "ind_matches", "ind_conf", "ind_url")
+
+
 def _row_from_signal(sig, today):
     g = lambda k: sig.get(k) if sig.get(k) is not None else ""
+    if sig.get("_sourcing_update"):                      # sourcing run: only touch indicative columns
+        return {"asin": g("asin"), **{k: g(k) for k in IND_KEYS}}
     return {"asin": g("asin"), "product": str(g("title"))[:120], "category": g("category_slug") or g("category"),
             "trend_score": g("trend_score"), "signal": g("signal"), "price": g("price_inr"),
             "sellers": g("seller_offers"), "bought": g("bought_past_month_min"),
-            "compliance": g("compliance"), "competition": g("competition"), "url": g("url"),
+            "compliance": g("compliance"), "seasonal": g("seasonal"), "competition": g("competition"),
+            "url": g("url"),
             "last_seen": today}
 
 
@@ -172,7 +195,8 @@ def merge(existing_rows, signals, today=None, top_n=TOP_N, stale_days=STALE_DAYS
         if a in by_asin:
             new = _row_from_signal(sig, today)
             by_asin[a].update({k: v for k, v in new.items() if v != ""})
-            seen.add(a)
+            if not sig.get("_sourcing_update"):
+                seen.add(a)
     for sig in signals[:top_n]:
         new = _row_from_signal(sig, today)
         a = new["asin"]
@@ -191,8 +215,11 @@ def merge(existing_rows, signals, today=None, top_n=TOP_N, stale_days=STALE_DAYS
         if a not in seen and not has_input and age > stale_days:
             continue
         out.append(r)
-    out.sort(key=lambda r: (str(r.get("sourcing") or "") == "", -_num(r.get("trend_score"))))
-    return out + manual
+    out.sort(key=lambda r: (str(r.get("sourcing") or "") == "", -_num(r.get("trend_score")),
+                            -_num(r.get("bought"))))
+    quoted = [r for r in out if str(r.get("sourcing") or "").strip() not in ("", "None")]
+    unquoted = [r for r in out if r not in quoted][:MAX_UNQUOTED]
+    return quoted + unquoted + manual
 
 
 def _num(v):
@@ -230,7 +257,10 @@ def parse(values):
     for line in values[1:]:
         if not any(str(x).strip() for x in line):
             continue
-        rows.append({k: (line[idx[h]] if h in idx and idx[h] < len(line) else "") for k, h, _ in COLS})
+        r = {k: (line[idx[h]] if h in idx and idx[h] < len(line) else "") for k, h, _ in COLS}
+        a = str(r.get("asin") or "").strip().lstrip("'")
+        r["asin"] = a.zfill(10) if a.isdigit() and len(a) < 10 else a
+        rows.append(r)
     return rows
 
 
@@ -341,6 +371,37 @@ def update_gsheet(wb, signals, today=None, refresh=None):
         existing = []
     rows = merge(existing, signals, today, refresh=refresh)
     vals = render(rows)
+    for line in vals[1:]:                       # keep all-digit ASINs (ISBNs) as text in Sheets
+        if str(line[0]).isdigit():
+            line[0] = "'" + str(line[0])
     ws.clear()
     ws.update(range_name="A1", values=vals, value_input_option="USER_ENTERED")
+    _format_gsheet(ws, len(vals))
     return len(rows)
+
+
+def _format_gsheet(ws, n_rows):
+    """Number formats + input colours in Sheets (best effort; never fails the run)."""
+    try:
+        pct = [k for k in ("purchase_gst", "defect", "referral", "rto", "sale_gst", "margin", "roi")]
+        inr = [k for k in ("price", "sourcing", "ship", "closing", "ads", "usable", "fees", "gst_pay",
+                           "rto_cost", "total", "profit", "cash")]
+        fmts = [{"range": f"{L[k]}2:{L[k]}{n_rows}", "format": {"numberFormat": {"type": "PERCENT", "pattern": "0.0%"}}}
+                for k in pct]
+        fmts += [{"range": f"{L[k]}2:{L[k]}{n_rows}", "format": {"numberFormat": {"type": "CURRENCY", "pattern": "₹#,##0"}}}
+                 for k in inr]
+        fmts += [{"range": f"{L[k]}2:{L[k]}{n_rows}", "format": {"backgroundColor": {"red": 1, "green": 1, "blue": 0.6}}}
+                 for k, _, kind in COLS if kind == "input"]
+        fmts += [{"range": "A1:" + f"{L[KEYS[-1]]}1", "format": {"textFormat": {"bold": True}}}]
+        ws.batch_format(fmts)
+        ws.freeze(rows=1, cols=2)
+    except Exception:
+        pass
+
+
+def read_gsheet(wb):
+    import gspread
+    try:
+        return parse(wb.worksheet(CALC_TAB).get_all_values(value_render_option="FORMULA"))
+    except gspread.WorksheetNotFound:
+        return []

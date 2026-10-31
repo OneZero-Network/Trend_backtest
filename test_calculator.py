@@ -21,6 +21,25 @@ check("unflagged says NOT cleared", "≠ cleared" in nf, nf)
 check("1 seller on bestseller → brand-owned note (not 'no demand')", "brand-owned" in K.competition_note(1, 5000))
 check("12 sellers → crowded but demand-aware", "Crowded" in K.competition_note(12, 10000) and "10,000" in K.competition_note(12, 10000))
 
+# ── regression: real titles from the first live run (Oct 31)
+real = {
+ "Desidiya 200 LED Waterfall Curtain String Lights 3x2m Warm White | 8 Lighting Modes": None,
+ "Kaku Fancy Dresses Halloween Costumes for Kids 3 to 8 Years": "Halloween",
+ "FLYNGO 12 Diya Diwali Curtain String LED Lights for Decoration - Warm White": "Diwali",
+ "Shreeji Creations Clay Diya|Traditional Clay Diya|Pack of 12": "Diwali",
+ "Raj Fancy Raj Halloween Dress | Costume and Accessories | For Girls and Boys": "Halloween",
+ "Skybags Brat Pro Max 35L Laptop Backpack (Upto 15.6\"), 3 Compartments": None,
+}
+bad = {t: K.seasonal_flag(t) for t, exp in real.items() if (exp is None) != (K.seasonal_flag(t) == "")
+       or (exp and exp not in K.seasonal_flag(t))}
+check("seasonal flag on real Diwali/Halloween titles, not on backpack/plain lights", not bad, str(bad))
+check("analog watch no longer flagged as electronics",
+      "BIS CRS" not in K.compliance_flags("MOOVER Women's Analog Quartz Watch with Stainless Steel Strap", "watches"))
+check("smart watch still flagged", "BIS CRS" in K.compliance_flags("Noise Smart Watch 1.8 inch", "watches"))
+check("'tea light candles' not flagged FSSAI",
+      "FSSAI" not in K.compliance_flags("FLYNGO 12 Pcs LED Tea Light Candles, Flameless", "kitchen"))
+check("green tea still flagged FSSAI", "FSSAI" in K.compliance_flags("Organic Green Tea 100 bags", "grocery"))
+
 # ── calculator merge + preserve
 def sig(asin, score, price, cat="kitchen", title=None, comp=None):
     return {"asin": asin, "title": title or f"Product {asin}", "category_slug": cat, "trend_score": score,
@@ -95,6 +114,24 @@ if rc2:
     d = {v[f"A{r}"].value: v[f"{C.L['decision']}{r}"].value for r in range(2, v.max_row + 1)}
     check("quarantined row decision = HOLD even with a quote", d["A2"].startswith("HOLD — price-dip"), d["A2"])
     check("recalc after refresh: zero errors", rc2.get("total_errors") == 0)
+
+# seasonal HOLD + unquoted-row cap + ISBN zero-padding
+p2 = os.path.join(TMP, "C2.xlsx")
+ss = sig("B0SEASON01", 99, 299); ss["seasonal"] = "SEASONAL: Diwali"
+C.update_xlsx(p2, [ss] + [sig(f"B0CAP{i:05d}", 50 - i * .1, 199) for i in range(24)], today="2026-10-30")
+C.update_xlsx(p2, [ss] + [sig(f"B0CAQ{i:05d}", 40 - i * .1, 199) for i in range(24)], today="2026-10-31")
+r2 = C.read_xlsx(p2)
+check(f"unquoted rows capped at {C.MAX_UNQUOTED}", len(r2) == C.MAX_UNQUOTED, f"{len(r2)} rows")
+wbx = openpyxl.load_workbook(p2); wsx = wbx[C.CALC_TAB]
+rs = [r for r in range(2, wsx.max_row + 1) if wsx[f"A{r}"].value == "B0SEASON01"][0]
+wsx[f"{C.L['sourcing']}{rs}"] = 50; wbx.save(p2)
+rc3 = recalc(p2)
+if rc3:
+    vv = openpyxl.load_workbook(p2, data_only=True)[C.CALC_TAB]
+    dec = [vv[f"{C.L['decision']}{r}"].value for r in range(2, vv.max_row + 1) if vv[f"A{r}"].value == "B0SEASON01"][0]
+    check("seasonal product with a great quote is still HOLD", dec.startswith("HOLD — seasonal"), dec)
+rows_isbn = C.parse([[h for _, h, _ in C.COLS], ["8640378"] + [""] * (len(C.COLS) - 1)])
+check("ISBN ASIN re-padded after Sheets stripped zeros", rows_isbn[0]["asin"] == "0008640378")
 
 # ── Google Sheets path (mock)
 class WS:

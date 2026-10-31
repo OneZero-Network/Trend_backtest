@@ -26,3 +26,12 @@ jobs:
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           BR_SEED_KEYWORDS:   ${{ vars.BR_SEED_KEYWORDS }}
         run: python trend_fetcher.py
+
+      - name: Save run output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bazaar-radar-states
+          path: output/
+          if-no-files-found: ignore
+          retention-days: 14

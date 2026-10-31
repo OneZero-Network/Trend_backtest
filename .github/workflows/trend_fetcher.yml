@@ -40,10 +40,19 @@ jobs:
           BR_CALC_TOP_N:      ${{ vars.BR_CALC_TOP_N || '25' }}
           YOUTUBE_API_KEY:    ${{ secrets.YOUTUBE_API_KEY }}
         run: python trend_fetcher.py
+      - name: Save run output (always, so data survives a Sheets problem)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bazaar-radar-output
+          path: output/
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Notify on workflow failure (Telegram)
         if: failure()
         run: |
-          TEXT="❌ Bazaar Radar — GitHub Actions FAILED%0ARun: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          TEXT="$(printf '❌ Bazaar Radar — GitHub Actions FAILED\nRun: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}')"
           curl -s --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
                --data-urlencode "text=${TEXT}" --data-urlencode "parse_mode=HTML" \
                "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage"

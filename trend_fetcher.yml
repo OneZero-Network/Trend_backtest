@@ -1,0 +1,49 @@
+name: Bazaar Radar — India E-commerce Trend Fetcher
+
+on:
+  # 09:30 IST daily (04:00 UTC). Daily, not weekday-only: e-commerce sells 7 days
+  # a week, and gaps in HISTORY weaken the rank-velocity signal.
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Trigger reason"
+        required: false
+        default: "Manual run"
+
+jobs:
+  fetch-trends:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60      # lists ≈ 20-30 min + 30 product pages ≈ 3 min (state trends moved to state_trends.yml)
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests pandas beautifulsoup4 gspread google-auth openpyxl
+          pip install curl_cffi || echo "curl_cffi failed — plain requests fallback (more Amazon blocks)"
+          pip install pytrends  || echo "pytrends failed — rising queries skipped"
+      - name: Run Bazaar Radar
+        env:
+          GOOGLE_CREDS_JSON:  ${{ secrets.GOOGLE_CREDS_JSON }}
+          GOOGLE_SHEET_ID:    ${{ secrets.GOOGLE_SHEET_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          BR_CATEGORIES:      ${{ vars.BR_CATEGORIES }}
+          BR_SEED_KEYWORDS:   ${{ vars.BR_SEED_KEYWORDS }}
+          BR_DETAIL_TOP_N:    ${{ vars.BR_DETAIL_TOP_N || '30' }}
+          BR_CALC_TOP_N:      ${{ vars.BR_CALC_TOP_N || '25' }}
+          YOUTUBE_API_KEY:    ${{ secrets.YOUTUBE_API_KEY }}
+        run: python trend_fetcher.py
+      - name: Notify on workflow failure (Telegram)
+        if: failure()
+        run: |
+          TEXT="❌ Bazaar Radar — GitHub Actions FAILED%0ARun: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s --data-urlencode "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+               --data-urlencode "text=${TEXT}" --data-urlencode "parse_mode=HTML" \
+               "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage"

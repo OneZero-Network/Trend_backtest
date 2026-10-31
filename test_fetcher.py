@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Offline tests for trend_fetcher.py (fixtures, no network). Run: python test_fetcher.py"""
+import os, sys, shutil, tempfile
+from datetime import timedelta
+import pandas as pd
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+TMP = tempfile.mkdtemp()
+os.environ.update({"BR_CATEGORIES": "electronics,beauty", "BR_OUTPUT_DIR": TMP, "BR_DETAIL_TOP_N": "5"})
+import trend_fetcher as tf
+
+ok = True
+def check(name, cond, detail=""):
+    global ok; ok &= bool(cond); print(f"{'PASS' if cond else 'FAIL'}  {name}  {detail}")
+
+# ── price parsing
+check("single price", tf.parse_prices("Boat Earbuds ₹1,299") == (1299, None, None))
+check("variant range", tf.parse_prices("Kurti ₹449 - ₹899") == (449, 899, None))
+check("labelled MRP", tf.parse_prices("₹999 M.R.P: ₹2,499") == (999, None, 2499))
+check("unlabelled strike price → MRP", tf.parse_prices("₹1,499 ₹3,999") == (1499, None, 3999))
+check("no price", tf.parse_prices("Currently unavailable") == (None, None, None))
+
+# ── product page
+PAGE = """<html><body><div id="centerCol">
+<div id="corePriceDisplay_desktop_feature_div">
+ <span class="a-price"><span class="a-offscreen">₹1,299</span></span>
+ <span class="savingsPercentage">-48%</span>
+ <span class="a-price a-text-price"><span class="a-offscreen">₹2,499</span></span> M.R.P.</div>
+<span id="social-proofing-faceout-title-tk_bought">5K+ bought in past month</span>
+<span>Limited time deal</span> <span>Apply ₹100 coupon</span> <span>Bank Offer 10% off</span>
+<span>Fulfilled</span> by Amazon. Cash on Delivery available.
+<a>New (12) from ₹1,249</a></div></body></html>"""
+d = tf.parse_product_page(PAGE, "B0TEST0001")
+exp = {"price_inr": 1299, "mrp_inr": 2499, "discount_pct": 48.0, "bought_past_month_min": 5000,
+       "seller_offers": 12, "coupon": "₹100", "limited_deal": True, "bank_offer": True,
+       "fulfilled_by_amazon": True, "cod_available": True}
+bad = {k: (d.get(k), v) for k, v in exp.items() if d.get(k) != v}
+check("product page fields", not bad, str(bad) if bad else "10/10 fields")
+d2 = tf.parse_product_page("<html><div id='centerCol'><span class='a-price'><span class='a-offscreen'>₹799</span></span>"
+                           "<span>1L+ bought in past month</span></div></html>", "B0TEST0002")
+check("lakh units + missing fields are None", d2["bought_past_month_min"] == 100000 and d2["mrp_inr"] is None
+      and d2["seller_offers"] is None and d2["discount_pct"] is None, str(d2))
+
+# ── 8-day simulation: discount-driven climber vs organic climber, details + states mocked
+def card(rank, asin, title, price, rev, mrp=None):
+    m = f" M.R.P: ₹{mrp:,}" if mrp else ""
+    return (f'<div id="gridItemRoot"><span class="zg-bdg-text">#{rank}</span><div data-asin="{asin}">'
+            f'<a href="/x/dp/{asin}"><img alt="{title}"></a><a href="/product-reviews/{asin}">'
+            f'4.2 out of 5 stars {rev:,}</a><span>₹{price:,}{m}</span></div></div>')
+def run_day(d):
+    tf.TODAY = (tf.NOW_IST - timedelta(days=7 - d)).strftime("%Y-%m-%d")
+    def fake(sb, url, retries=3):
+        if "pg=2" in url or url.endswith("amazon.in/"): return "<html></html>"
+        if "/dp/" in url:
+            return PAGE
+        base = [card(i, f"B0ELEC{i:04d}", f"Gadget {i}", 999 + i, 1000 + i * 10) for i in range(3, 20)]
+        organic = card(max(1, 60 - 8 * d), "B0ORGANIC1", "Organic Climber", 1499, 200 + d * 120, mrp=1999)
+        price = 2999 if d < 5 else 1799                          # 40% cut from day 5 → 3 snapshots by day 7
+        hj = card(max(3, 65 - 8 * d), "B0HIJACKED", "Hijacked Organic", 899 if d == 7 else 1999, 250 + d * 110)
+        cut = card(max(2, 70 - 9 * d), "B0DISCOUNT", "Discount Climber", price, 300 + d * 60, mrp=3999)
+        return organic + cut + hj + "".join(base)
+    tf.fetch_html = fake; tf.new_session = lambda: None
+    tf.fetch_trending_rss = lambda: []; tf.fetch_rising_queries = lambda: []
+    tf.fetch_state_interest = lambda: [
+        {"date": tf.TODAY, "keyword": k, "state": s, "geo_code": "", "interest_3m": v, "interest_1m": v,
+         "rank_3m": r, "rank_1m": r2, "rank_change": r - r2, "low_signal": v < 10}
+        for k in ("air fryer", "kurti") for (s, v, r, r2) in
+        (("Kerala", 100, 1, 1), ("Goa", 90, 2, 6), ("Bihar", 40, 6, 2), ("Sikkim", 5, 9, 9))]
+    tf.MIN_GAP_SEC = 0; tf.RUN_LOG.clear()
+    msgs = []; tf.send_telegram = msgs.append
+    tf.main()
+    return msgs
+for d in range(8):
+    msgs = run_day(d)
+sig = pd.read_csv(os.path.join(TMP, "TREND_SIGNALS.csv")).set_index("asin")
+check("discount-driven climb labelled", sig.loc["B0DISCOUNT", "signal"].startswith("💸"),
+      f"{sig.loc['B0DISCOUNT', 'signal']} · price change {sig.loc['B0DISCOUNT', 'price_change_7d_pct']}%")
+check("organic climb NOT labelled discount-driven", not str(sig.loc["B0ORGANIC1", "signal"]).startswith("💸"),
+      sig.loc["B0ORGANIC1", "signal"])
+check("discount penalty lowers the discount climber's score",
+      sig.loc["B0DISCOUNT", "trend_score"] < sig.loc["B0DISCOUNT", "trend_score_unpenalized"],
+      f"{sig.loc['B0DISCOUNT', 'trend_score_unpenalized']:.1f} → {sig.loc['B0DISCOUNT', 'trend_score']:.1f}")
+check("organic climber not penalised",
+      abs(sig.loc["B0ORGANIC1", "trend_score"] - sig.loc["B0ORGANIC1", "trend_score_unpenalized"]) < 1e-9)
+check("1-day dip quarantined (held), not penalised",
+      sig.loc["B0HIJACKED", "signal"].startswith("⏸ Quarantined") and not bool(sig.loc["B0HIJACKED", "actionable"])
+      and abs(sig.loc["B0HIJACKED", "trend_score"] - sig.loc["B0HIJACKED", "trend_score_unpenalized"]) < 0.01,
+      f"{sig.loc['B0HIJACKED', 'signal']} · status {sig.loc['B0HIJACKED', 'discount_status']}")
+check("quarantined product excluded from Telegram top signals",
+      not any("Hijacked Organic" in m.split("Quarantined")[0] for m in msgs) and any("Quarantined" in m for m in msgs))
+import calculator as CALC
+crow7 = {r["asin"]: r for r in CALC.read_xlsx(os.path.join(TMP, "CALCULATOR.xlsx"))}
+check("calculator row shows CURRENT quarantine status (not yesterday's signal)",
+      "Quarantined" in str(crow7["B0HIJACKED"]["signal"]), str(crow7["B0HIJACKED"]["signal"])[:40])
+check("decision formula holds quarantined rows", "Quarantined" in str(crow7["B0HIJACKED"]["decision"]))
+msgs8 = run_day(8)
+crow8 = {r["asin"]: r for r in CALC.read_xlsx(os.path.join(TMP, "CALCULATOR.xlsx"))}
+check("…and shows the released status next day", "Quarantined" not in str(crow8["B0HIJACKED"]["signal"]))                                    # next day: hijacked price snaps back
+sig8 = pd.read_csv(os.path.join(TMP, "TREND_SIGNALS.csv")).set_index("asin")
+check("quarantine releases the product when price recovers next day",
+      bool(sig8.loc["B0HIJACKED", "actionable"]) and not str(sig8.loc["B0HIJACKED", "signal"]).startswith("⏸"),
+      sig8.loc["B0HIJACKED", "signal"])
+check("organic climber now outranks discount climber",
+      sig.loc["B0ORGANIC1", "trend_score"] > sig.loc["B0DISCOUNT", "trend_score"])
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "backtest"))
+import config as BC
+same = (tf.PRICE_DROP_PCT, tf.DISCOUNT_LOOKBACK_DAYS, tf.DISCOUNT_PENALTY, tf.DISCOUNT_SUSTAIN_HOURS) == \
+       (BC.DISCOUNT_DROP_PCT, BC.DISCOUNT_LOOKBACK_DAYS, BC.DISCOUNT_PENALTY, BC.DISCOUNT_SUSTAIN_HOURS)
+check("live penalty == backtested penalty (same constants)", same)
+import calculator as CALC
+crow = {r["asin"]: r for r in CALC.read_xlsx(os.path.join(TMP, "CALCULATOR.xlsx"))}
+check("daily run fills CALCULATOR", "B0ORGANIC1" in crow, f"{len(crow)} rows")
+check("compliance + competition columns on signals", {"compliance", "competition"} <= set(sig.columns)
+      and sig["compliance"].astype(str).str.contains("REVIEW|NOT FLAGGED").all())
+check("details merged into signals", {"bought_past_month_min", "seller_offers", "discount_pct", "crowded_listing"} <= set(sig.columns))
+check("crowded listing flagged at >=10 sellers", bool(sig["crowded_listing"].dropna().any()))
+bs = pd.read_csv(os.path.join(TMP, "AMZ_BESTSELLERS.csv"))
+check("MRP captured from list page", bs["mrp_inr"].notna().sum() >= 2)
+check("daily run does NOT call state trends", not os.path.exists(os.path.join(TMP, "STATE_SUMMARY.csv")))
+tf.BR_MODE = "states"; tf.BR_STATE_TRENDS = True
+msgs = []; tf.send_telegram = msgs.append
+tf.main()
+ss = pd.read_csv(os.path.join(TMP, "STATE_SUMMARY.csv"))
+check("state summary excludes low-signal states", "Sikkim" not in set(ss["state"]), ss["state"].tolist())
+check("rising state detected", int(ss.set_index("state").loc["Bihar", "rising_keywords"]) == 2)
+check("weekly states job labels states as search share", any("search share, not sales" in m for m in msgs))
+tf.fetch_state_interest = lambda: []
+msgs = []; tf.send_telegram = msgs.append
+tf.main()
+check("states job survives Google returning nothing", any("no data" in m for m in msgs))
+shutil.rmtree(TMP)
+print("\nALL PASS" if ok else "\nSOME FAILED"); sys.exit(0 if ok else 1)

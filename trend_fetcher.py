@@ -112,6 +112,8 @@ SEED_KEYWORDS = [k.strip() for k in (os.environ.get("BR_SEED_KEYWORDS") or _DEFA
 
 BR_DETAIL_TOP_N = int(os.environ.get("BR_DETAIL_TOP_N") or "30")   # product pages fetched per run
 PRODUCT_EXTRA_GAP_SEC = 4.0     # added on top of the normal throttle for /dp/ pages
+DETAIL_BLOCK_STREAK = 3         # consecutive captcha'd product pages → stop product pages for this run
+DETAIL_STATS = {}
 BR_CALC_TOP_N   = int(os.environ.get("BR_CALC_TOP_N") or "25")     # actionable signals pushed to CALCULATOR
 # Day-1 scores are ties (no history) → don't ADD rows until enough history exists (rows already there still refresh)
 BR_CALC_MIN_DAYS = int(os.environ.get("BR_CALC_MIN_DAYS") or "7")
@@ -612,11 +614,19 @@ def parse_product_page(html, asin):
 def fetch_details(asins):
     if not asins:
         return pd.DataFrame()
-    sess_box, rows, blocked = [new_session()], [], 0
-    for a in asins:
+    sess_box, rows, blocked, streak, skipped = [new_session()], [], 0, 0, 0
+    for i, a in enumerate(asins):
+        if streak >= DETAIL_BLOCK_STREAK:
+            # Amazon is captcha-walling product pages: stop asking this run. Pushing on deepens the
+            # block and risks the list pages (the core data) being blocked too.
+            skipped = len(asins) - i
+            log(f"Product details: {streak} blocked in a row — stopping for this run ({skipped} skipped)", "WARN")
+            break
         html = fetch_html(sess_box, f"https://www.amazon.in/dp/{a}", retries=2)
         if html is None:
-            blocked += 1; continue
+            blocked += 1; streak += 1
+            continue
+        streak = 0
         try:
             d = parse_product_page(html, a)
             rows.append(d)
@@ -625,7 +635,8 @@ def fetch_details(asins):
             time.sleep(PRODUCT_EXTRA_GAP_SEC + random.uniform(0, 3))   # product pages trip captchas faster
         except Exception as exc:
             log_tb(f"parse product page {a}", exc)
-    log(f"Product details: {len(rows)}/{len(asins)} parsed · {blocked} blocked")
+    log(f"Product details: {len(rows)}/{len(asins)} parsed · {blocked} blocked · {skipped} skipped (circuit breaker)")
+    DETAIL_STATS.update(parsed=len(rows), blocked=blocked, skipped=skipped)
     return pd.DataFrame(rows)
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1180,7 +1191,7 @@ def main():
     if BR_MODE == "states":
         return main_states()
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.6 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.10 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -1303,6 +1314,9 @@ def main():
     # ── Telegram digest
     lines = [f"📡 <b>Bazaar Radar</b> — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
+    if DETAIL_STATS.get("skipped"):
+        lines.append(f"⚠️ Amazon captcha'd product pages — stopped after {DETAIL_STATS['blocked']} blocks "
+                     f"({DETAIL_STATS['skipped']} skipped). Avoid extra manual runs today.")
     if SHEET_PROBLEM:
         lines.append(f"⚠️ <b>Sheet not updated:</b> {_esc(SHEET_PROBLEM[0])}\nResults saved as run artifact "
                      f"'bazaar-radar-output'. {_actions_url()}")

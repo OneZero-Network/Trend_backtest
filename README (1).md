@@ -127,6 +127,9 @@ Limits: IndiaMART has no public product API and its terms restrict scraping, so 
 
 Header renames are handled: quotes typed under an old column name are kept (a bug caught while upgrading the workbook).
 
+## v1.10: product-page circuit breaker
+Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
+
 ## Two Telegram chats
 | Secret | Who | Receives |
 |---|---|---|

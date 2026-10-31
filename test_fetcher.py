@@ -19,6 +19,20 @@ check("labelled MRP", tf.parse_prices("₹999 M.R.P: ₹2,499") == (999, None, 2
 check("unlabelled strike price → MRP", tf.parse_prices("₹1,499 ₹3,999") == (1499, None, 3999))
 check("no price", tf.parse_prices("Currently unavailable") == (None, None, None))
 
+# ── circuit breaker: 3 captcha'd product pages in a row → stop asking
+calls = []
+_fh, _ns = tf.fetch_html, tf.new_session
+tf.fetch_html = lambda sb, url, retries=3: calls.append(url) or None
+tf.new_session = lambda: None
+d = tf.fetch_details([f"B0BLOCK{i:03d}" for i in range(30)])
+check("product pages: stops after 3 blocks in a row (not 30)", len(calls) == 3 and tf.DETAIL_STATS["skipped"] == 27,
+      f"{len(calls)} requests, {tf.DETAIL_STATS}")
+seq = iter([None, None, "<html><div id='centerCol'></div></html>", None, None, None])
+calls.clear(); tf.fetch_html = lambda sb, url, retries=3: calls.append(url) or next(seq, None)
+tf.fetch_details([f"B0MIX{i:03d}" for i in range(10)])
+check("a success resets the streak", len(calls) == 6, f"{len(calls)} requests")
+tf.fetch_html, tf.new_session = _fh, _ns
+
 # ── regressions from the first live run
 os.environ["BR_SEED_KEYWORDS"] = ""
 import importlib
@@ -204,6 +218,7 @@ same = (tf.PRICE_DROP_PCT, tf.DISCOUNT_LOOKBACK_DAYS, tf.DISCOUNT_PENALTY, tf.DI
 check("live penalty == backtested penalty (same constants)", same)
 import calculator as CALC
 crow = {r["asin"]: r for r in CALC.read_xlsx(os.path.join(TMP, "CALCULATOR.xlsx"))}
+tf.DETAIL_STATS.clear()
 check("daily run fills CALCULATOR (after the 7-day history gate)", "B0ORGANIC1" in crow, f"{len(crow)} rows")
 check("compliance + competition columns on signals", {"compliance", "competition"} <= set(sig.columns)
       and sig["compliance"].astype(str).str.contains("REVIEW|NOT FLAGGED").all())

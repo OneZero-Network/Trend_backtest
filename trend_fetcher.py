@@ -738,18 +738,47 @@ def category_heat(signals):
 # STORAGE — Google Sheets (same as fortress) or local CSV fallback
 # ══════════════════════════════════════════════════════════════════════
 
+SHEET_PROBLEM = []   # filled when Google Sheets is configured but unusable → run continues locally
+
+
+def _sheet_fix_hint(exc, email):
+    msg = str(exc)
+    sid = f"{GOOGLE_SHEET_ID[:6]}…{GOOGLE_SHEET_ID[-4:]}" if len(GOOGLE_SHEET_ID) > 12 else GOOGLE_SHEET_ID
+    if "403" in msg or "permission" in msg.lower() or isinstance(exc, PermissionError):
+        return (f"Google Sheet {sid} refused access (403). Share the sheet with {email} as Editor, and check "
+                f"GOOGLE_SHEET_ID is THIS sheet's ID (the part between /d/ and /edit in its URL).")
+    if "404" in msg or "not found" in msg.lower():
+        return f"Google Sheet {sid} not found (404). GOOGLE_SHEET_ID is wrong or the sheet was deleted."
+    if "has not been used" in msg or "disabled" in msg.lower():
+        return "Google Sheets API (and Drive API) must be enabled in the service account's Cloud project."
+    return f"Google Sheets error: {type(exc).__name__}: {msg[:200]}"
+
+
 class Store:
     def __init__(self):
         self.wb = None
         if GOOGLE_CREDS_JSON and GOOGLE_SHEET_ID:
-            import gspread
-            from google.oauth2.service_account import Credentials
-            creds = Credentials.from_service_account_info(json.loads(GOOGLE_CREDS_JSON), scopes=_SCOPES)
-            self.wb = gspread.authorize(creds).open_by_key(GOOGLE_SHEET_ID)
-            log("Storage: Google Sheets")
-        else:
-            os.makedirs(LOCAL_OUT_DIR, exist_ok=True)
-            log(f"Storage: local CSV in ./{LOCAL_OUT_DIR} (Google secrets not set)")
+            email = "(unknown — check client_email in GOOGLE_CREDS_JSON)"
+            try:
+                import gspread
+                from google.oauth2.service_account import Credentials
+                info = json.loads(GOOGLE_CREDS_JSON)
+                email = info.get("client_email", email)
+                creds = Credentials.from_service_account_info(info, scopes=_SCOPES)
+                self.wb = gspread.authorize(creds).open_by_key(GOOGLE_SHEET_ID)
+                log(f"Storage: Google Sheets (as {email})")
+                return
+            except json.JSONDecodeError as exc:
+                hint = f"GOOGLE_CREDS_JSON is not valid JSON ({exc}). Paste the whole credentials.json file."
+            except Exception as exc:
+                hint = _sheet_fix_hint(exc, email)
+            SHEET_PROBLEM.append(hint)
+            log(f"SHEETS UNAVAILABLE → {hint}", "ERR")
+            log("Continuing with local files so the Amazon fetch still runs; they are uploaded as a "
+                "workflow artifact named 'bazaar-radar-output'.", "WARN")
+        os.makedirs(LOCAL_OUT_DIR, exist_ok=True)
+        if not SHEET_PROBLEM:
+            log(f"Storage: local files in ./{LOCAL_OUT_DIR} (Google secrets not set)")
 
     def read(self, tab):
         if self.wb is None:
@@ -809,6 +838,8 @@ def main_states():
     rate limits never touch the daily Amazon run."""
     log(f"📍 BAZAAR RADAR — state interest (weekly) · {TODAY}")
     store = Store()
+    if SHEET_PROBLEM:
+        send_telegram(f"📍 Bazaar Radar states — ⚠️ {_esc(SHEET_PROBLEM[0])}")
     st = pd.DataFrame(fetch_state_interest())
     if st.empty:
         log("No state data (Google rate-limited or pytrends missing)", "WARN")
@@ -936,6 +967,9 @@ def main():
     # ── Telegram digest
     lines = [f"📡 <b>Bazaar Radar</b> — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
+    if SHEET_PROBLEM:
+        lines.append(f"⚠️ <b>Sheet not updated:</b> {_esc(SHEET_PROBLEM[0])}\nResults saved as run artifact "
+                     f"'bazaar-radar-output'. {_actions_url()}")
     quarantined = pd.DataFrame()
     if not signals.empty and "actionable" in signals:
         quarantined = signals[~signals["actionable"].astype(bool)]
@@ -988,6 +1022,9 @@ def main():
     if amz_stats["ok"] == 0:
         log("No Amazon list fetched successfully — exiting non-zero", "ERR")
         sys.exit(2)
+    if SHEET_PROBLEM:
+        log("Run finished but the Google Sheet was not updated — exiting non-zero so it shows red", "ERR")
+        sys.exit(3)
 
 if __name__ == "__main__":
     try:

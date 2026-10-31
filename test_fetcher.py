@@ -46,6 +46,7 @@ def card(rank, asin, title, price, rev, mrp=None):
     return (f'<div id="gridItemRoot"><span class="zg-bdg-text">#{rank}</span><div data-asin="{asin}">'
             f'<a href="/x/dp/{asin}"><img alt="{title}"></a><a href="/product-reviews/{asin}">'
             f'4.2 out of 5 stars {rev:,}</a><span>₹{price:,}{m}</span></div></div>')
+import json
 def run_day(d):
     tf.TODAY = (tf.NOW_IST - timedelta(days=7 - d)).strftime("%Y-%m-%d")
     def fake(sb, url, retries=3):
@@ -66,7 +67,9 @@ def run_day(d):
         for k in ("air fryer", "kurti") for (s, v, r, r2) in
         (("Kerala", 100, 1, 1), ("Goa", 90, 2, 6), ("Bihar", 40, 6, 2), ("Sikkim", 5, 9, 9))]
     tf.MIN_GAP_SEC = 0; tf.RUN_LOG.clear()
-    msgs = []; tf.send_telegram = msgs.append
+    msgs = []
+    if not getattr(tf, "_keep_sender", False):
+        tf.send_telegram = msgs.append
     tf.main()
     return msgs
 for d in range(8):
@@ -127,5 +130,31 @@ tf.fetch_state_interest = lambda: []
 msgs = []; tf.send_telegram = msgs.append
 tf.main()
 check("states job survives Google returning nothing", any("no data" in m for m in msgs))
+# ── Google Sheet 403 (unshared sheet): run must continue locally, explain fix, exit 3
+import gspread
+from google.oauth2 import service_account as _sa
+tf.BR_MODE = "daily"; tf.fetch_state_interest = lambda: []
+tf.GOOGLE_CREDS_JSON = json.dumps({"type": "service_account", "client_email": "radar-bot@proj.iam.gserviceaccount.com"})
+tf.GOOGLE_SHEET_ID = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+_orig_auth, _orig_cred = gspread.authorize, _sa.Credentials.from_service_account_info
+class _C:
+    def open_by_key(self, k): raise PermissionError()
+gspread.authorize = lambda creds: _C()
+_sa.Credentials.from_service_account_info = staticmethod(lambda info, scopes=None: object())
+tf.SHEET_PROBLEM.clear()
+msgs = []; tf.send_telegram = msgs.append
+code = None
+tf._keep_sender = True
+try:
+    run_day(7)
+except SystemExit as e:
+    code = e.code
+gspread.authorize, _sa.Credentials.from_service_account_info = _orig_auth, _orig_cred
+check("403 on sheet: run continues and fetches Amazon", any("Amazon lists:" in m for m in msgs))
+check("403: Telegram names the exact email to share with",
+      any("radar-bot@proj.iam.gserviceaccount.com" in m and "Editor" in m for m in msgs))
+check("403: results saved locally for the artifact", os.path.exists(os.path.join(TMP, "TREND_SIGNALS.csv")))
+check("403: exits non-zero (3) so the run shows red", code == 3, f"exit {code}")
+
 shutil.rmtree(TMP)
 print("\nALL PASS" if ok else "\nSOME FAILED"); sys.exit(0 if ok else 1)

@@ -110,7 +110,8 @@ _DEFAULT_SEEDS = ("smartwatch,air fryer,sunscreen,protein powder,earbuds,saree,k
 # `or` (not a get() default): an EMPTY repo variable must also fall back to the defaults
 SEED_KEYWORDS = [k.strip() for k in (os.environ.get("BR_SEED_KEYWORDS") or _DEFAULT_SEEDS).split(",") if k.strip()]
 
-BR_DETAIL_TOP_N = int(os.environ.get("BR_DETAIL_TOP_N", "30"))   # product pages fetched per run
+BR_DETAIL_TOP_N = int(os.environ.get("BR_DETAIL_TOP_N") or "30")   # product pages fetched per run
+PRODUCT_EXTRA_GAP_SEC = 4.0     # added on top of the normal throttle for /dp/ pages
 BR_CALC_TOP_N   = int(os.environ.get("BR_CALC_TOP_N") or "25")     # actionable signals pushed to CALCULATOR
 # Day-1 scores are ties (no history) → don't ADD rows until enough history exists (rows already there still refresh)
 BR_CALC_MIN_DAYS = int(os.environ.get("BR_CALC_MIN_DAYS") or "7")
@@ -288,8 +289,7 @@ def parse_prices(text):
         mrp = max(pm)          # unlabelled strike-through price; treated as MRP
     return min(pm), None, mrp
 
-_AMAZON_EMPTY = re.compile(r"(there are no (movers and shakers|new releases|best ?sellers|items) available"
-                           r"|no (movers and shakers|items) available in this category)", re.I)
+_AMAZON_EMPTY = re.compile(r"there are no [\w\s&'-]{2,40} available in this category", re.I)
 
 
 def own_movers(hist, today):
@@ -529,7 +529,7 @@ def fetch_rising_queries():
         return []
     rows = []
     try:
-        pt = TrendReq(hl="en-IN", tz=330, timeout=(10, 25), retries=2, backoff_factor=1.5)
+        pt = TrendReq(hl="en-IN", tz=330, timeout=(10, 25))   # no retries/backoff: pytrends' Retry call breaks on urllib3 ≥2
     except Exception as exc:
         log_tb("pytrends init failed", exc); return []
     for kw in SEED_KEYWORDS:
@@ -583,8 +583,18 @@ def parse_product_page(html, asin):
         if out.get("price_inr") and out.get("mrp_inr") and out["mrp_inr"] > out["price_inr"] else None)
     bm = _RX_BOUGHT.search(soup.get_text(" ", strip=True))
     out["bought_past_month_min"] = _bought_to_int(bm.group(1), bm.group(2)) if bm else None
-    sm = _RX_SELLERS.search(ctext)
-    out["seller_offers"] = int(next(g for g in sm.groups() if g)) if sm else None
+    full = soup.get_text(" ", strip=True)
+    sm = _RX_SELLERS.search(full)        # "New (10) from" sits in the RIGHT column, not #centerCol
+    has_merchant = bool(soup.find(id="merchantInfoFeature_feature_div") or soup.find(id="sellerProfileTriggerId")
+                        or re.search(r"\bSold by\b", full))
+    has_buybox = has_merchant or bool(re.search(r"\b(Buy Now|Add to Cart)\b", ctext)) and bool(out.get("price_inr"))
+    if sm:
+        out["seller_offers"], out["seller_source"] = int(next(g for g in sm.groups() if g)), "offer count"
+    elif has_merchant and not re.search(r"Other sellers on Amazon", full, re.I):
+        out["seller_offers"], out["seller_source"] = 1, "single 'Sold by', no other offers"
+    else:
+        out["seller_offers"] = None
+        out["seller_source"] = "page without buy box (Amazon served a reduced page)" if not has_buybox else "not found"
     cm = _RX_COUPON.search(ctext)
     out["coupon"] = cm.group(1).replace(" ", "") if cm else ""
     out["limited_deal"] = "Limited time deal" in ctext
@@ -605,8 +615,9 @@ def fetch_details(asins):
         try:
             d = parse_product_page(html, a)
             rows.append(d)
-            if d.get("seller_offers") is None:
+            if d.get("seller_offers") is None and d.get("seller_source") == "not found":
                 _dump_debug(html, f"product_{a}", "sellers_unparsed", 0)
+            time.sleep(PRODUCT_EXTRA_GAP_SEC + random.uniform(0, 3))   # product pages trip captchas faster
         except Exception as exc:
             log_tb(f"parse product page {a}", exc)
     log(f"Product details: {len(rows)}/{len(asins)} parsed · {blocked} blocked")
@@ -626,7 +637,7 @@ def fetch_state_interest():
     except ImportError:
         log("pytrends not installed — skipping state interest", "WARN"); return []
     try:
-        pt = TrendReq(hl="en-IN", tz=330, timeout=(10, 25), retries=2, backoff_factor=1.5)
+        pt = TrendReq(hl="en-IN", tz=330, timeout=(10, 25))   # no retries/backoff: pytrends' Retry call breaks on urllib3 ≥2
     except Exception as exc:
         log_tb("pytrends init failed", exc); return []
     rows = []
@@ -954,7 +965,7 @@ class Store:
 
 def enrich_signals(signals, det, dh):
     """Join product-page fields; add 'bought past month' growth from DETAIL_HISTORY."""
-    keep = ["asin", "mrp_inr", "discount_pct", "bought_past_month_min", "seller_offers",
+    keep = ["asin", "mrp_inr", "discount_pct", "bought_past_month_min", "seller_offers", "seller_source",
             "coupon", "limited_deal", "bank_offer", "fulfilled_by_amazon", "cod_available"]
     out = signals.drop(columns=[c for c in keep[1:] if c in signals.columns]).merge(
         det[[c for c in keep if c in det.columns]], on="asin", how="left")
@@ -1068,7 +1079,7 @@ def main():
     if BR_MODE == "states":
         return main_states()
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.2 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.6 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()

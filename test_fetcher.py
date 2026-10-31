@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Offline tests for trend_fetcher.py (fixtures, no network). Run: python test_fetcher.py"""
-import os, sys, json, shutil, tempfile
+import os, re, sys, json, shutil, tempfile
 from datetime import timedelta
 import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -35,6 +35,30 @@ real = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests_fixt
                          "amazon_in_movers_empty_2026-10-31.html"), encoding="utf-8").read()
 check("real empty Movers page: 0 rows, recognised as Amazon-side",
       tf.parse_list_page(real, "movers", "electronics") == [] and bool(tf._AMAZON_EMPTY.search(real)))
+
+FX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests_fixtures")
+rd = lambda n: open(os.path.join(FX, n), encoding="utf-8").read()
+nr = rd("amazon_in_new_releases_empty.html")
+check("real 'no HOT new releases' page recognised as Amazon-side", bool(tf._AMAZON_EMPTY.search(nr))
+      and tf.parse_list_page(nr, "new_releases", "grocery") == [])
+p10 = tf.parse_product_page(rd("amazon_in_product_10_offers.html"), "B0HK4GNJF1")
+check("real page: 'New (10) from' in right column → 10 sellers", p10["seller_offers"] == 10, str(p10.get("seller_source")))
+p1 = tf.parse_product_page(rd("amazon_in_product_single_seller.html"), "B0HL8XMHM5")
+check("real page: only 'Sold by' → 1 seller", p1["seller_offers"] == 1, str(p1.get("seller_source")))
+p0 = tf.parse_product_page(rd("amazon_in_product_no_buybox.html"), "B0HKK3FSLN")
+check("real reduced page (no buy box) → unknown, labelled as such", p0["seller_offers"] is None
+      and "without buy box" in p0["seller_source"], p0["seller_source"])
+try:
+    from pytrends.request import TrendReq
+    import inspect as _i
+    src_tr = _i.getsource(tf.fetch_rising_queries) + _i.getsource(tf.fetch_state_interest)
+    lib = _i.getsource(TrendReq)
+    guarded = re.search(r"if self\.retries > 0 or self\.backoff_factor > 0", lib) is not None
+    check("pytrends: our calls pass no retries/backoff, and the library only builds the broken "
+          "Retry(method_whitelist=…) when they are set", guarded and "retries=" not in src_tr
+          and "backoff_factor=" not in src_tr)
+except ImportError:
+    print("SKIP  pytrends not installed")
 
 # ── own movers from bestseller history
 H = pd.DataFrame([
@@ -135,7 +159,7 @@ def run_day(d):
          "rank_3m": r, "rank_1m": r2, "rank_change": r - r2, "low_signal": v < 10}
         for k in ("air fryer", "kurti") for (s, v, r, r2) in
         (("Kerala", 100, 1, 1), ("Goa", 90, 2, 6), ("Bihar", 40, 6, 2), ("Sikkim", 5, 9, 9))]
-    tf.MIN_GAP_SEC = 0; tf.RUN_LOG.clear()
+    tf.MIN_GAP_SEC = 0; tf.PRODUCT_EXTRA_GAP_SEC = 0; tf.RUN_LOG.clear()
     msgs = []
     if not getattr(tf, "_keep_sender", False):
         tf.send_telegram = msgs.append

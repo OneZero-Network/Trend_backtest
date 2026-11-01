@@ -81,7 +81,11 @@ def check_products(products, api_key, session=None, max_products=15, now=None):
         tot_views = sum(v["views"] for v in vids)
         liked = [v for v in vids if v["likes"] is not None]
         like_rate = (sum(v["likes"] for v in liked) / max(sum(v["views"] for v in liked), 1)) if liked else None
-        neg = sum(bool(NEG.search(v["title"])) for v in vids) / len(vids)
+        # words that are part of the product's own name ("Fake Lizards") are not negative buzz
+        own = {w.lower() for w in re.findall(r"[A-Za-z']+", f"{title} {kw}")}
+        def _neg(t):
+            return any(m.group(0).lower() not in own for m in NEG.finditer(t))
+        neg = sum(_neg(v["title"]) for v in vids) / len(vids)
         vpd = sum(v["vpd"] for v in vids)
         verdict = ("⚠ Negative buzz — watch before buying" if neg >= 0.3 else
                    "Active review interest" if vpd >= 1000 else

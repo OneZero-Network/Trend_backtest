@@ -532,6 +532,11 @@ def fetch_trending_rss():
         log_tb("Google Trends RSS failed", exc)
         return []
 
+# Rising queries about films, songs, definitions etc. are not shopping demand ("lunch box movie").
+_NOISE_QUERY = re.compile(r"\b(movie|film|song|songs|lyrics|meaning|in hindi meaning|cast|trailer|web ?series|"
+                          r"wikipedia|wiki|full form|kya hai|story|review in hindi|ott|episode|actor|actress)\b", re.I)
+
+
 def fetch_rising_queries():
     try:
         from pytrends.request import TrendReq
@@ -548,6 +553,7 @@ def fetch_rising_queries():
             pt.build_payload([kw], timeframe="today 3-m", geo="IN", cat=18)  # 18 = Shopping
             rq = pt.related_queries().get(kw, {}).get("rising")
             if rq is not None and not rq.empty:
+                rq = rq[~rq["query"].astype(str).str.contains(_NOISE_QUERY)]
                 for _, r in rq.head(10).iterrows():
                     rows.append({"date": TODAY, "source": "rising_query", "query": r["query"],
                                  "seed": kw, "value": str(r["value"]),  # % growth, or 'Breakout'
@@ -1209,7 +1215,7 @@ def main():
     if BR_MODE == "states":
         return main_states()
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.10 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.13 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -1330,7 +1336,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.13 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if DETAIL_STATS.get("skipped"):
         lines.append(f"⚠️ Amazon captcha'd product pages — stopped after {DETAIL_STATS['blocked']} blocks "
@@ -1344,7 +1350,17 @@ def main():
         signals_act = signals[signals["actionable"].astype(bool)]
     else:
         signals_act = signals
-    if not signals_act.empty:
+    if not signals_act.empty:     # untitled rows (embedded-list items with no card) are useless in a digest
+        signals_act = signals_act[signals_act["title"].astype(str).str.strip().str.len().gt(3)
+                                  & ~signals_act["title"].astype(str).str.lower().isin(["nan", "none"])]
+    n_hist = hist["date"].nunique() if "hist" in locals() and not hist.empty else 0
+    if not signals_act.empty and n_hist < BR_CALC_MIN_DAYS:
+        lines.append(f"\n⏳ <b>Learning: day {n_hist} of {BR_CALC_MIN_DAYS}.</b> Scores are ties until rank history "
+                     f"builds, so no ranking is shown yet — don't act on today's list.")
+        lines.append("<i>Sample of products being tracked:</i>")
+        for _, r in signals_act.head(5).iterrows():
+            lines.append(f"• {_esc(str(r['title'])[:70])} · {_esc(r['category'])}")
+    elif not signals_act.empty:
         lines.append(f"Confidence: {_esc(signals_act['confidence'].iloc[0])}\n\n<b>Top trend signals</b>")
         for _, r in signals_act.head(10).iterrows():
             price = f"₹{int(r['price_inr']):,}" if pd.notna(r["price_inr"]) else ""
@@ -1368,7 +1384,7 @@ def main():
         lines.append(f"\n⏸ <b>Quarantined</b> ({len(quarantined)}): price dip &lt;48h, decision in ≤2 days")
         for _, r in quarantined.head(3).iterrows():
             lines.append(f"• {_esc(str(r['title'])[:60])} · score {r['trend_score']:.0f} (held)")
-    if not heat.empty:
+    if not heat.empty and n_hist >= BR_CALC_MIN_DAYS:
         lines.append("\n<b>Hottest categories</b>")
         for _, r in heat.head(5).iterrows():
             lines.append(f"• {_esc(r['category'])} — {r['top10_score']:.0f} "
@@ -1381,6 +1397,7 @@ def main():
     rising = gt[gt["source"] == "rising_query"] if not gt.empty else gt
     if not rising.empty:
         lines.append("\n<b>Rising searches (Google, IN)</b>")
+        rising = rising.groupby("seed", sort=False).head(2)          # variety: max 2 per seed keyword
         for _, r in rising.head(8).iterrows():
             lines.append(f"• {_esc(r['query'])} <i>(via {_esc(r['seed'])}, +{r['value']}%)</i>")
     if amz_stats["ok"] == 0:

@@ -23,7 +23,8 @@ check("12 sellers → crowded but demand-aware", "Crowded" in K.competition_note
 
 # ── regression: real titles from the first live run (Oct 31)
 real = {
- "Desidiya 200 LED Waterfall Curtain String Lights 3x2m Warm White | 8 Lighting Modes": None,
+ # changed after the Oct 31 digest: decor lights peak for festivals even without the word "Diwali"
+ "Desidiya 200 LED Waterfall Curtain String Lights 3x2m Warm White | 8 Lighting Modes": "Festive decor",
  "Kaku Fancy Dresses Halloween Costumes for Kids 3 to 8 Years": "Halloween",
  "FLYNGO 12 Diya Diwali Curtain String LED Lights for Decoration - Warm White": "Diwali",
  "Shreeji Creations Clay Diya|Traditional Clay Diya|Pack of 12": "Diwali",
@@ -32,13 +33,23 @@ real = {
 }
 bad = {t: K.seasonal_flag(t) for t, exp in real.items() if (exp is None) != (K.seasonal_flag(t) == "")
        or (exp and exp not in K.seasonal_flag(t))}
-check("seasonal flag on real Diwali/Halloween titles, not on backpack/plain lights", not bad, str(bad))
+check("seasonal flag on real Diwali/Halloween/festive-decor titles, not on backpack", not bad, str(bad))
+for t in ("Desidiya 200 LED Waterfall Curtain String Lights 3x2m Warm White | 8 Lighting Modes",
+          "Festivora 35 Feet 8mm Big Size LED Pixel String Lights | Super Bright"):
+    check(f"festive decor lights flagged seasonal: {t[:30]}…", "Festive decor" in K.seasonal_flag(t))
+check("ordinary LED bulb / lunch box NOT seasonal", K.seasonal_flag("Philips 9W LED Bulb") == ""
+      and K.seasonal_flag("Milton Steel Lunch Box 3 Containers") == "")
 check("analog watch no longer flagged as electronics",
       "BIS CRS" not in K.compliance_flags("MOOVER Women's Analog Quartz Watch with Stainless Steel Strap", "watches"))
 check("smart watch still flagged", "BIS CRS" in K.compliance_flags("Noise Smart Watch 1.8 inch", "watches"))
 check("'tea light candles' not flagged FSSAI",
       "FSSAI" not in K.compliance_flags("FLYNGO 12 Pcs LED Tea Light Candles, Flameless", "kitchen"))
 check("green tea still flagged FSSAI", "FSSAI" in K.compliance_flags("Organic Green Tea 100 bags", "grocery"))
+
+# ── regressions from the live digest (Oct 31)
+check("'Tap Extension for Kitchen Sink' NOT flagged as electronics",
+      "BIS CRS" not in K.compliance_flags("Amazon Basics Flexible Tap Extension for Kitchen Sink with Universal Connector", "home-improvement"))
+check("'Extension Board 4 socket' still flagged", "BIS CRS" in K.compliance_flags("Extension Board with 4 Sockets", "home-improvement"))
 
 # ── calculator merge + preserve
 def sig(asin, score, price, cat="kitchen", title=None, comp=None):
@@ -176,6 +187,18 @@ class Sess:
             items.append({"id": vid, "snippet": {"title": "Power bank EXPLODED - don't buy" if bad else "Phone grip review",
                           "publishedAt": "2026-10-20T00:00:00Z"}, "statistics": {"viewCount": "50000", "likeCount": "2000"}})
         return R({"items": items})
+class SessLizard(Sess):
+    def get(self, url, params=None, timeout=None):
+        self.calls.append((url.rsplit("/", 1)[-1], params.get("q")))
+        if url.endswith("search"):
+            return R({"items": [{"id": {"videoId": f"liz{i}"}, "snippet": {"title": "t"}} for i in range(8)]})
+        return R({"items": [{"id": v, "snippet": {"title": ("Fake lizard prank on my sister 😂" if i % 2 else
+                 "Fake Lizards review — scam, don't buy"), "publishedAt": "2026-10-20T00:00:00Z"},
+                 "statistics": {"viewCount": "90000", "likeCount": "4000"}} for i, v in enumerate(params["id"].split(","))]})
+yl = Y.check_products([("LIZ", "Fake Lizards (Pack of 6) - Halloween Decoration | Propcon")], "KEY", session=SessLizard(),
+                      now=datetime(2026, 10, 31, tzinfo=timezone.utc))[0]
+check("'Fake' in the product's own name is not negative buzz; real negatives still count",
+      yl["negative_title_share"] == 0.5, f"share {yl['negative_title_share']} (only the 'scam, don't buy' half)")
 sess = Sess()
 out = Y.check_products([("P1", "Ringke Phone Grip Holder for iPhone, Black (Pack of 2)"),
                         ("P2", "Ambrane 20000mAh Power Bank, 22.5W Fast Charging")], "KEY", session=sess,

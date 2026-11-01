@@ -27,7 +27,7 @@ CATEGORY_RULES = {
 KEYWORD_RULES = [
     (r"\b(charger|adapter|power ?bank|usb|led|lamp|bulb|speaker|earphone|earbud|headphone|"
      r"smart ?watch|fitness band|keyboard|mouse|monitor|router|cctv|camera|trimmer|shaver|"
-     r"battery|batteries|inverter|extension|plug|socket|cable)\b", "BIS CRS (electronics) — check list"),
+     r"battery|batteries|inverter|extension (?:board|cord|socket|box)|spike guard|plug|socket|cable)\b", "BIS CRS (electronics) — check list"),
     (r"\b(toy|toys|puzzle|doll|blocks?|lego|rc car|kids?|children|baby|teether|rattle)\b",
      "BIS (toys QCO) — check"),
     (r"\b(protein|whey|supplement|vitamin|capsule|gummies|tea(?!\s*-?\s*lights?)|coffee|snack|masala|honey|"
@@ -90,6 +90,9 @@ SEASONAL = [
     ("Eid", r"\b(eid|ramadan|ramzan)\b"),
     ("Karwa Chauth", r"\b(karwa chauth|karva chauth)\b"),
     ("Valentine's", r"\b(valentine)\b"),
+    # decor that peaks for Diwali / Christmas / weddings even when the title names no festival
+    ("Festive decor", r"\b((string|fairy|curtain|pixel|rope|waterfall|serial|diwali)\s+lights?|toran|bandhanwar|"
+                      r"jhalar|led\s+(string|curtain|pixel|rope)|decorative\s+lights?)\b"),
     ("Monsoon", r"\b(raincoat|umbrella)\b"),
     ("Summer", r"\b(air cooler|neck fan|ice pack)\b"),
     ("Winter", r"\b(room heater|blower heater|thermal wear|electric blanket)\b"),

@@ -179,8 +179,10 @@ def run_day(d):
         tf.send_telegram = msgs.append
     tf.main()
     return msgs
+digests = {}
 for d in range(8):
     msgs = run_day(d)
+    digests[d] = "\n".join(m for m in msgs if "Bazaar Radar</b>" in m)
 sig = pd.read_csv(os.path.join(TMP, "TREND_SIGNALS.csv")).set_index("asin")
 check("discount-driven climb labelled", sig.loc["B0DISCOUNT", "signal"].startswith("💸"),
       f"{sig.loc['B0DISCOUNT', 'signal']} · price change {sig.loc['B0DISCOUNT', 'price_change_7d_pct']}%")
@@ -219,6 +221,16 @@ check("live penalty == backtested penalty (same constants)", same)
 import calculator as CALC
 crow = {r["asin"]: r for r in CALC.read_xlsx(os.path.join(TMP, "CALCULATOR.xlsx"))}
 tf.DETAIL_STATS.clear()
+check("days 1–6: digest says LEARNING, shows no ranking", all("Learning: day" in digests[d] and
+      "Top trend signals" not in digests[d] and "Hottest categories" not in digests[d] for d in range(6)))
+check("day 7+: ranked list + category heat appear", "Top trend signals" in digests[7] and "Hottest categories" in digests[7])
+gtx = pd.DataFrame([{"source": "rising_query", "query": f"{sd} q{i}", "seed": sd, "value": 100, "note": ""}
+                    for sd in ("smartwatch", "lunch box", "yoga mat") for i in range(5)])
+noise = ["lunch box movie", "lunch box movie cast", "self heating lunch box", "glass lunch box", "tiffin meaning in hindi"]
+kept = [q for q in noise if not tf._NOISE_QUERY.search(q)]
+check("rising searches: film/meaning queries dropped, product queries kept",
+      kept == ["self heating lunch box", "glass lunch box"], str(kept))
+check("rising searches: max 2 per seed keyword", gtx.groupby("seed", sort=False).head(2)["seed"].value_counts().max() == 2)
 check("daily run fills CALCULATOR (after the 7-day history gate)", "B0ORGANIC1" in crow, f"{len(crow)} rows")
 check("compliance + competition columns on signals", {"compliance", "competition"} <= set(sig.columns)
       and sig["compliance"].astype(str).str.contains("REVIEW|NOT FLAGGED").all())

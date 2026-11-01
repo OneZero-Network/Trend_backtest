@@ -37,6 +37,11 @@ KEYWORD_RULES = [
     (r"\b(thermometer|oximeter|bp monitor|nebuli[sz]er|glucometer|mask|sanitizer|"
      r"orthopedic|brace|massager)\b", "CDSCO (medical device) — check"),
     (r"\b(pressure cooker|helmet|gas stove|lpg|stainless steel utensil)\b", "BIS (QCO) — check"),
+    (r"\b(insect killer|insecticide|pesticide|mosquito (?:spray|repellent|coil|liquid|vaporizer)|cockroach|"
+     r"termite|bed ?bug|fly killer|repellent|rat (?:poison|kill))\b",
+     "Insecticides Act — registration (CIB&RC) & licence to sell — check"),
+    (r"\b(cat food|dog food|pet food|kitten food|puppy food|pet treats?|dog treats?|cat treats?)\b",
+     "Pet food — check applicable BIS / FSSAI / labelling rules"),
 ]
 _COMPILED = [(re.compile(p, re.I), tag) for p, tag in KEYWORD_RULES]
 

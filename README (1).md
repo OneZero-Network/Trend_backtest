@@ -130,6 +130,12 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.14: from the day-2 live data
+- **Variant-swap guard:** Amazon sometimes swaps which size or flavour of a product it lists (Purepet cat food 6 kg → 1 kg, both at #1). Our own-mover calculation saw a "new" product jumping from #101 to #1 (+10,000%). A new entrant now inherits the best rank its **product family** (same first title words, same category) had yesterday. 12 swaps were caught in your day-2 data. Shown in `mover_note`.
+- **Title fill:** ranks 31–50 and 81–100 come only from Amazon's embedded list, without titles (40% of rows). Titles are now filled from any day or list where the product appeared with one (960 → 718 untitled after 2 days, improving daily). Untitled products are kept out of the calculator and picks, but appear in the ranked digest as a link.
+- Compliance: insecticides (**Insecticides Act / CIB&RC**) and pet food are now flagged.
+- Rising searches: "how to / what is / why / kaise / recipe" queries are dropped.
+
 ## v1.13
 - **Festive decor** seasonal group: string, fairy, curtain, pixel, rope and waterfall lights, toran, bandhanwar. These peak for Diwali, Christmas and weddings even when the title names no festival (Desidiya curtain lights in late October).
 - Rising searches about films, songs or meanings are dropped ("lunch box **movie**").

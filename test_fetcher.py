@@ -74,6 +74,24 @@ try:
 except ImportError:
     print("SKIP  pytrends not installed")
 
+# ── REAL history (pet-supplies, Oct 31 → Nov 1): Amazon swapped Purepet 6 kg (#1) for 1 kg (#1)
+RH = pd.read_csv(os.path.join(FX, "real_history_pet_supplies_2026-10-31_11-01.csv"), dtype=str)
+RH["rank"] = pd.to_numeric(RH["rank"])
+before_fill = (~RH["title"].map(tf._has_title)).sum()
+RH = tf.fill_titles(RH)
+check("titles filled from other days for lazy-loaded ranks", (~RH["title"].map(tf._has_title)).sum() < before_fill,
+      f"untitled {before_fill} → {(~RH['title'].map(tf._has_title)).sum()}")
+om_real = tf.own_movers(RH, "2026-11-01")
+check("variant swap (Purepet 6 kg → 1 kg at #1) is NOT a +10,000% mover",
+      om_real.get("B0BMGP89P1", 0) < 100 and tf.SWAPS.get("B0BMGP89P1") == 1,
+      f"pct {om_real.get('B0BMGP89P1', 0):.0f}, swap note: family was #{tf.SWAPS.get('B0BMGP89P1')}")
+check("family key groups sizes, not different products",
+      tf.family_key("Purepet Adult Dry Cat Food 1kg | Ocean Fish") == tf.family_key("Purepet Adult Dry Cat Food 6kg | Ocean")
+      and tf.family_key("Purepet Adult Dry Cat Food 1kg") != tf.family_key("Purepet Adult Dry Dog Food 10kg"))
+check("Hit spray → Insecticides Act flag", "Insecticides Act" in
+      __import__("compliance").compliance_flags("Hit Flying Insect Killer - Mosquito & Fly Killer Spray (700ML)", "home-improvement"))
+check("'how to clean …' search dropped", bool(tf._NOISE_QUERY.search("how to clean stainless steel water bottle")))
+
 # ── own movers from bestseller history
 H = pd.DataFrame([
     # date, list, category_slug, asin, rank

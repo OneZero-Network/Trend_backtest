@@ -319,15 +319,42 @@ def own_movers(hist, today):
     r = bs.groupby(["category_slug", "date", "asin"])["rank"].min()
     cats_prev = set(bs.loc[bs["date"] == prev, "category_slug"])
     cats_now = set(bs.loc[bs["date"] == today, "category_slug"])
+    SWAPS.clear()
+    titles = bs[bs["title"].map(_has_title)].groupby("asin")["title"].last() if "title" in bs else pd.Series(dtype=str)
     out = {}
     for cat in cats_prev & cats_now:
         now = r.loc[(cat, today)]
         before = r.loc[(cat, prev)]
+        fam_prev = {}
+        for a, rk in before.items():                 # best rank yesterday per product family
+            k = family_key(titles.get(a, ""))
+            if k:
+                fam_prev[k] = min(fam_prev.get(k, 101), rk)
         for asin, rn in now.items():
-            rp = before.get(asin, 101)
+            if asin in before.index:
+                rp = before[asin]
+            else:
+                # new to the list: if a size/flavour sibling was listed yesterday, Amazon swapped the
+                # displayed variant (6 kg → 1 kg) — inherit the family's rank, not "from #101"
+                rp = fam_prev.get(family_key(titles.get(asin, "")), 101)
+                if rp < 101:
+                    SWAPS[asin] = int(rp)
             if rn > 0 and rp > rn:
                 out[asin] = max(out.get(asin, 0), (rp - rn) / rn * 100)
     return pd.Series(out, dtype=float)
+
+
+SWAPS = {}   # asin → inherited family rank (filled by own_movers; shown as mover_note)
+
+
+def family_key(title, words=4):
+    """Product family = first words of the title before any '|' or '(' and without sizes/numbers.
+    'Purepet Adult Dry Cat Food 1kg | Ocean Fish' and '… 6kg …' share 'purepet adult dry cat'."""
+    if not _has_title(title):
+        return ""
+    head = re.split(r"[|(\[,–-]", str(title))[0].lower()
+    toks = [w for w in re.findall(r"[a-z]+", head) if len(w) > 1]
+    return " ".join(toks[:words]) if len(toks) >= 3 else ""
 
 
 def parse_recs_json(soup):
@@ -534,7 +561,8 @@ def fetch_trending_rss():
 
 # Rising queries about films, songs, definitions etc. are not shopping demand ("lunch box movie").
 _NOISE_QUERY = re.compile(r"\b(movie|film|song|songs|lyrics|meaning|in hindi meaning|cast|trailer|web ?series|"
-                          r"wikipedia|wiki|full form|kya hai|story|review in hindi|ott|episode|actor|actress)\b", re.I)
+                          r"wikipedia|wiki|full form|kya hai|story|review in hindi|ott|episode|actor|actress|how to|what is|why|"
+                          r"how much|kaise|recipe)\b", re.I)
 
 
 def fetch_rising_queries():
@@ -733,6 +761,23 @@ def update_history(hist, today_frames):
     hist = hist[hist["date"] >= cutoff].copy()
     for c in ("rank", "price_inr", "rating", "reviews"):
         hist[c] = pd.to_numeric(hist[c], errors="coerce")
+    return fill_titles(hist)
+
+
+def _has_title(t):
+    t = str(t).strip()
+    return len(t) > 3 and t.lower() not in ("nan", "none")
+
+
+def fill_titles(hist):
+    """~40% of list items (ranks 31–50, 81–100) come only from Amazon's embedded JSON, without a title.
+    Fill them from any other day/list where the same ASIN appeared with a title (latest wins)."""
+    if hist.empty or "title" not in hist:
+        return hist
+    ok = hist["title"].map(_has_title)
+    known = hist[ok].sort_values("date").groupby("asin")["title"].last()
+    miss = ~ok & hist["asin"].isin(known.index)
+    hist.loc[miss, "title"] = hist.loc[miss, "asin"].map(known)
     return hist
 
 def compute_signals(hist, frames):
@@ -789,6 +834,7 @@ def compute_signals(hist, frames):
     fill = out["mover_source"].eq("none") & out.index.isin(own.index)
     out.loc[fill, "pct_gain"] = own.reindex(out.index)[fill]
     out.loc[fill, "mover_source"] = "own_1d"
+    out["mover_note"] = [f"variant swap — family was #{SWAPS[a]} yesterday" if a in SWAPS else "" for a in out.index]
     pg = pd.to_numeric(out["pct_gain"], errors="coerce")
     out["mover"] = (pg.apply(lambda v: math.log10(v + 1) / 4 if pd.notna(v) else 0)).clip(0, 1)
     out.loc[out["was_unranked"].fillna(False).astype(bool), "mover"] = 1.0
@@ -879,7 +925,7 @@ def compute_signals(hist, frames):
     cols = ["trend_score", "signal", "confidence", "category", "category_slug", "title", "price_inr", "rating",
             "reviews", "reviews_per_day", "review_growth_pct", "bs_rank_today", "bs_rank_ref",
             "bs_ref_date", "rank_change", "price_change_7d_pct", "discount_status", "discount_driven", "short_dip", "actionable",
-            "trend_score_unpenalized", "pct_gain", "mover_source", "lists_today", "days_on_list_14d",
+            "trend_score_unpenalized", "pct_gain", "mover_source", "mover_note", "lists_today", "days_on_list_14d",
             "first_seen", "momentum", "mover", "review_vel", "new_launch", "persistence", "breadth"]
     out = out.reset_index().rename(columns={"index": "asin"})
     out["url"] = "https://www.amazon.in/dp/" + out["asin"]
@@ -1215,7 +1261,7 @@ def main():
     if BR_MODE == "states":
         return main_states()
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.13 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.14 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -1310,6 +1356,7 @@ def main():
         if not signals.empty:
             act = signals[signals["actionable"].astype(bool)] if "actionable" in signals else signals
             act = act[~act.get("category_slug", act["category"]).isin(BR_CALC_EXCLUDE)]
+            act = act[act["title"].map(_has_title)]          # no title → can't search/quote it yet
             n_days = hist["date"].nunique() if "hist" in locals() and not hist.empty else 0
             if n_days < BR_CALC_MIN_DAYS:
                 log(f"Calculator: {n_days}/{BR_CALC_MIN_DAYS} days of history — not adding new rows yet "
@@ -1336,7 +1383,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.13 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.14 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if DETAIL_STATS.get("skipped"):
         lines.append(f"⚠️ Amazon captcha'd product pages — stopped after {DETAIL_STATS['blocked']} blocks "
@@ -1350,15 +1397,16 @@ def main():
         signals_act = signals[signals["actionable"].astype(bool)]
     else:
         signals_act = signals
-    if not signals_act.empty:     # untitled rows (embedded-list items with no card) are useless in a digest
-        signals_act = signals_act[signals_act["title"].astype(str).str.strip().str.len().gt(3)
-                                  & ~signals_act["title"].astype(str).str.lower().isin(["nan", "none"])]
+    if not signals_act.empty:     # untitled rows keep their place in the ranking but show as a link
+        signals_act = signals_act.copy()
+        signals_act["title"] = [t if _has_title(t) else f"(title not loaded yet — open {a})"
+                                for t, a in zip(signals_act["title"], signals_act["asin"])]
     n_hist = hist["date"].nunique() if "hist" in locals() and not hist.empty else 0
     if not signals_act.empty and n_hist < BR_CALC_MIN_DAYS:
         lines.append(f"\n⏳ <b>Learning: day {n_hist} of {BR_CALC_MIN_DAYS}.</b> Scores are ties until rank history "
                      f"builds, so no ranking is shown yet — don't act on today's list.")
         lines.append("<i>Sample of products being tracked:</i>")
-        for _, r in signals_act.head(5).iterrows():
+        for _, r in signals_act[~signals_act["title"].str.startswith("(title not loaded")].head(5).iterrows():
             lines.append(f"• {_esc(str(r['title'])[:70])} · {_esc(r['category'])}")
     elif not signals_act.empty:
         lines.append(f"Confidence: {_esc(signals_act['confidence'].iloc[0])}\n\n<b>Top trend signals</b>")

@@ -12,6 +12,9 @@ on:
         required: false
         default: "Manual run"
 
+permissions:
+  contents: write          # to push the daily archive to the data-archive branch
+
 jobs:
   fetch-trends:
     runs-on: ubuntu-latest
@@ -40,6 +43,27 @@ jobs:
           BR_CALC_TOP_N:      ${{ vars.BR_CALC_TOP_N || '25' }}
           YOUTUBE_API_KEY:    ${{ secrets.YOUTUBE_API_KEY }}
         run: python trend_fetcher.py
+      - name: Archive today's data permanently (data-archive branch)
+        if: always()
+        run: |
+          [ -d output/archive ] || { echo "No archive files this run"; exit 0; }
+          A=$(mktemp -d) && cp -r output/archive/. "$A"/
+          git config user.name  "bazaar-radar-bot"
+          git config user.email "bazaar-radar-bot@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin data-archive >/dev/null 2>&1; then
+            git fetch --depth=1 origin data-archive
+            git checkout -f -B data-archive FETCH_HEAD
+          else
+            git checkout --orphan data-archive
+            git rm -rf --quiet . || true
+            printf "# Bazaar Radar daily archive\n\narchive/YYYY-MM-DD/{history,signals,gtrends}.csv.gz — one folder per day, kept forever.\n" > README.md
+            git add README.md
+          fi
+          mkdir -p archive && cp -r "$A"/. archive/
+          git add archive
+          git commit -m "archive $(date -u +%F)" || echo "Nothing new to archive"
+          git push origin data-archive
+
       - name: Save run output (always, so data survives a Sheets problem)
         if: always()
         uses: actions/upload-artifact@v4

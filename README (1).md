@@ -130,6 +130,15 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.15: data retention
+| Where | What | How long |
+|---|---|---|
+| Google Sheet `HISTORY`, `DETAIL_HISTORY`, `YT_HISTORY`, **`GTRENDS_HISTORY`** (new) | Every day's ranks, prices, reviews, product details, YouTube checks, rising searches | Rolling 60 days (keeps the Sheet fast and under its cell limit) |
+| Sheet `AMZ_*`, `TREND_SIGNALS`, `YT_CHECK`, `GTRENDS` | **Today only** (daily snapshot; their history lives in the tabs above) | 1 day |
+| **GitHub branch `data-archive`** (new) | `archive/YYYY-MM-DD/history.csv.gz`, `signals.csv.gz`, `gtrends.csv.gz` | **Forever** (~40 KB/day, ~15 MB/year) |
+
+The archive branch is created automatically on the first run and never touches your code branch. To read it: on GitHub, switch branch to `data-archive` → `archive/` → pick a date. Or load it in Python with `pd.read_csv("…/history.csv.gz")`.
+
 ## v1.14: from the day-2 live data
 - **Variant-swap guard:** Amazon sometimes swaps which size or flavour of a product it lists (Purepet cat food 6 kg → 1 kg, both at #1). Our own-mover calculation saw a "new" product jumping from #101 to #1 (+10,000%). A new entrant now inherits the best rank its **product family** (same first title words, same category) had yesterday. 12 swaps were caught in your day-2 data. Shown in `mover_note`.
 - **Title fill:** ranks 31–50 and 81–100 come only from Amazon's embedded list, without titles (40% of rows). Titles are now filled from any day or list where the product appeared with one (960 → 718 untitled after 2 days, improving daily). Untitled products are kept out of the calculator and picks, but appear in the ranked digest as a link.

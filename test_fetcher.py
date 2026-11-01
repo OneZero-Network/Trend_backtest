@@ -249,6 +249,13 @@ kept = [q for q in noise if not tf._NOISE_QUERY.search(q)]
 check("rising searches: film/meaning queries dropped, product queries kept",
       kept == ["self heating lunch box", "glass lunch box"], str(kept))
 check("rising searches: max 2 per seed keyword", gtx.groupby("seed", sort=False).head(2)["seed"].value_counts().max() == 2)
+arch = os.path.join(TMP, "archive")
+days_arch = sorted(os.listdir(arch)) if os.path.isdir(arch) else []
+check("permanent archive: one folder per day with history + signals",
+      len(days_arch) >= 7 and all(os.path.exists(os.path.join(arch, d, "history.csv.gz")) for d in days_arch),
+      f"{len(days_arch)} day folders")
+ah = pd.read_csv(os.path.join(arch, days_arch[0], "history.csv.gz"), dtype=str)
+check("archived history holds that day only, readable", set(ah["date"]) == {days_arch[0]} and len(ah) > 0)
 check("daily run fills CALCULATOR (after the 7-day history gate)", "B0ORGANIC1" in crow, f"{len(crow)} rows")
 check("compliance + competition columns on signals", {"compliance", "competition"} <= set(sig.columns)
       and sig["compliance"].astype(str).str.contains("REVIEW|NOT FLAGGED").all())

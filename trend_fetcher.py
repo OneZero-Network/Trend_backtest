@@ -769,6 +769,23 @@ def _has_title(t):
     return len(t) > 3 and t.lower() not in ("nan", "none")
 
 
+ARCHIVE_DIR = os.path.join(LOCAL_OUT_DIR, "archive")
+
+
+def archive_today(name, df):
+    """Permanent archive: one gzipped CSV per day per dataset (output/archive/YYYY-MM-DD/name.csv.gz).
+    The workflow commits these to the `data-archive` branch, so nothing is lost after the 60-day
+    rolling window in the Sheet. ~40 KB/day."""
+    try:
+        if df is None or len(df) == 0:
+            return
+        d = os.path.join(ARCHIVE_DIR, TODAY)
+        os.makedirs(d, exist_ok=True)
+        df.to_csv(os.path.join(d, f"{name}.csv.gz"), index=False, compression="gzip")
+    except Exception as exc:
+        log(f"archive {name} failed: {exc}", "WARN")
+
+
 def fill_titles(hist):
     """~40% of list items (ranks 31–50, 81–100) come only from Amazon's embedded JSON, without a title.
     Fill them from any other day/list where the same ASIN appeared with a title (latest wins)."""
@@ -1261,7 +1278,7 @@ def main():
     if BR_MODE == "states":
         return main_states()
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.14 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.15 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -1275,7 +1292,15 @@ def main():
         except Exception as exc: log_tb(f"write {tab}", exc)
 
     gt = pd.DataFrame(fetch_trending_rss() + fetch_rising_queries())
-    try: written["GTRENDS"] = store.write("GTRENDS", gt)
+    try:
+        written["GTRENDS"] = store.write("GTRENDS", gt)
+        if not gt.empty:                                   # keep rising searches across days
+            gh = store.read("GTRENDS_HISTORY")
+            gh = gh[gh["date"] != TODAY] if not gh.empty else gh
+            gh = pd.concat([gh, gt.astype(str)], ignore_index=True) if not gh.empty else gt.astype(str)
+            cutoff = (NOW_IST - timedelta(days=HISTORY_DAYS)).strftime("%Y-%m-%d")
+            written["GTRENDS_HISTORY"] = store.write("GTRENDS_HISTORY", gh[gh["date"] >= cutoff])
+            archive_today("gtrends", gt)
     except Exception as exc: log_tb("write GTRENDS", exc)
 
     signals, heat = pd.DataFrame(), pd.DataFrame()
@@ -1294,6 +1319,8 @@ def main():
         heat = category_heat(signals)
         written["TREND_SIGNALS"] = store.write("TREND_SIGNALS", signals)
         written["CATEGORY_HEAT"] = store.write("CATEGORY_HEAT", heat)
+        archive_today("history", hist[hist["date"] == TODAY])
+        archive_today("signals", signals)
         log(f"History: {hist['date'].nunique() if not hist.empty else 0} days · {len(signals)} scored ASINs")
     except Exception as exc:
         log_tb("analysis", exc)
@@ -1383,7 +1410,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.14 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.15 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if DETAIL_STATS.get("skipped"):
         lines.append(f"⚠️ Amazon captcha'd product pages — stopped after {DETAIL_STATS['blocked']} blocks "

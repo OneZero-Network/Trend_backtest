@@ -19,6 +19,18 @@ check("labelled MRP", tf.parse_prices("₹999 M.R.P: ₹2,499") == (999, None, 2
 check("unlabelled strike price → MRP", tf.parse_prices("₹1,499 ₹3,999") == (1499, None, 3999))
 check("no price", tf.parse_prices("Currently unavailable") == (None, None, None))
 
+# ── plain-language states message (per keyword)
+_rows = []
+for kw, data in {"lunch box": [("Haryana", 100, 1, 1), ("Delhi", 90, 2, 2), ("Karnataka", 80, 3, 6), ("Punjab", 60, 8, 3), ("Sikkim", 5, 20, 20)],
+                 "yoga mat": [("Karnataka", 100, 1, 1), ("Telangana", 85, 4, 2), ("Delhi", 95, 2, 3), ("Jharkhand", 50, 9, 4)]}.items():
+    for stt, v, r3, r1 in data:
+        _rows.append({"keyword": kw, "state": stt, "interest_3m": v, "rank_3m": r3, "rank_1m": r1, "rank_change": r3 - r1, "low_signal": v < 10})
+_st = pd.DataFrame(_rows); _m = tf.states_message(_st, tf.state_summary(_st), "2026-11-01")
+check("states message: per keyword 'most' + 'growing' (≥3 places), low-signal states dropped",
+      "lunch box</b> — most: Haryana, Delhi, Karnataka · growing: Punjab" in _m and "growing: Jharkhand" in _m
+      and "Telangana" not in _m.split("yoga mat")[1].split("growing")[1] and "Sikkim" not in _m)
+check("states message says it's not sales", "not sales" in _m)
+
 # ── circuit breaker: 3 captcha'd product pages in a row → stop asking
 calls = []
 _fh, _ns = tf.fetch_html, tf.new_session
@@ -270,7 +282,7 @@ tf.main()
 ss = pd.read_csv(os.path.join(TMP, "STATE_SUMMARY.csv"))
 check("state summary excludes low-signal states", "Sikkim" not in set(ss["state"]), ss["state"].tolist())
 check("rising state detected", int(ss.set_index("state").loc["Bihar", "rising_keywords"]) == 2)
-check("weekly states job labels states as search share", any("search share, not sales" in m for m in msgs))
+check("weekly states job labels states as search share", any("not sales" in m and "Where people are searching" in m for m in msgs))
 tf.fetch_state_interest = lambda: []
 msgs = []; tf.send_telegram = msgs.append
 tf.main()

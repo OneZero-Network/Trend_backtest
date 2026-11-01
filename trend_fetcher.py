@@ -1083,12 +1083,27 @@ def main_states():
     store.write("GTRENDS_STATES", st)
     summ = state_summary(st)
     store.write("STATE_SUMMARY", summ)
-    lines = [f"📍 <b>States leading search interest</b> — week of {TODAY}",
-             "<i>search share, not sales; use for ad geo-targeting, not inventory</i>"]
-    for _, r in summ.head(8).iterrows():
-        lines.append(f"• {_esc(r['state'])} — top-5 for {r['top5_keywords']}/{r['keywords']} keywords, "
-                     f"rising on {r['rising_keywords']}")
-    send_telegram("\n".join(lines))
+    send_telegram(states_message(st, summ, TODAY))
+
+
+def states_message(st, summ, today):
+    """Plain-language weekly states message: per keyword, where it's searched most and where it's growing."""
+    lines = [f"📍 <b>Where people are searching</b> — week of {_esc(today)}",
+             "<i>Which states search Google most for each of your keywords (share of that state's searches — "
+             "not number of buyers, not sales). Useful only for choosing ad target states.</i>", ""]
+    d = st[~st["low_signal"].astype(str).str.lower().isin(["true"])].copy()
+    d["rank_3m"] = pd.to_numeric(d["rank_3m"], errors="coerce")
+    d["rank_change"] = pd.to_numeric(d["rank_change"], errors="coerce")
+    for kw, g in d.groupby("keyword", sort=False):
+        most = g.sort_values("rank_3m").head(3)["state"].tolist()
+        rising = g[g["rank_change"] >= 3].sort_values("rank_change", ascending=False).head(2)["state"].tolist()
+        lines.append(f"• <b>{_esc(kw)}</b> — most: {_esc(', '.join(most)) or '—'}"
+                     + (f" · growing: {_esc(', '.join(rising))}" if rising else ""))
+    if summ is not None and not summ.empty:
+        top = summ.head(3)["state"].tolist()
+        lines += ["", f"Overall strongest interest: {_esc(', '.join(top))}."]
+    return "\n".join(lines)
+
 
 def main_affiliate():
     """Weekly: choose picks, record same-category random baselines, draft the channel post."""

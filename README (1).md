@@ -130,6 +130,9 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.24: rerun publishes picks that were only drafted
+If today's picks were made before `AFFILIATE_CHAT_ID` and the tag were set, they were only drafted to the admin chat. A rerun now posts them **once** to the public chat, rebuilt with your current tag. The forward test isn't re-drawn. A new `PUBLIC_POSTS` tab records what went where, so nothing is posted twice. A run that has nothing to do now tells the admin chat why, instead of stopping silently.
+
 ## v1.23: separate public bot
 Set the secret `AFFILIATE_BOT_TOKEN` (for example @OneZeroDeals_bot's token) and public posts go out through that bot, while errors, margins and sourcing stay on the admin bot. If it isn't set, the admin bot posts as before. `AFFILIATE_GROUPS` can now be set as a secret too.
 

@@ -168,6 +168,22 @@ tf.AFFILIATE_CHAT_ID = "ADMIN"
 tf.main_affiliate()
 check("same ID in both secrets → refuses to post publicly, warns admin",
       all(c == "ADMIN" for c, _ in sent) and any("SAME as TELEGRAM_CHAT_ID" in t for _, t in sent))
+# v1.24: picks drafted first (no channel, no tag) → later run with channel posts them ONCE, with the tag
+for f in ("PICKS.csv", "PUBLIC_POSTS.csv"):
+    if os.path.exists(os.path.join(TMP, f)): os.remove(os.path.join(TMP, f))
+sent.clear(); tf.AFFILIATE_CHAT_ID, tf.AFFILIATE_TAG = "", ""
+tf.main_affiliate()
+n_rows = len(pd.read_csv(os.path.join(TMP, "PICKS.csv")))
+check("v1.24 setup: first run only drafts to admin", not any(c == "PUBLIC" for c, _ in sent))
+sent.clear(); tf.AFFILIATE_CHAT_ID, tf.AFFILIATE_TAG = "PUBLIC", "mytag-21"
+tf.main_affiliate()
+pub = [t for c, t in sent if c == "PUBLIC"]
+check("v1.24: rerun after adding the channel posts the recorded picks publicly",
+      len(pub) == 1 + 2 and all("tag=mytag-21" in t for t in pub[1:]), f"{len(pub)} public")
+check("v1.24: forward test not re-drawn (PICKS unchanged)", len(pd.read_csv(os.path.join(TMP, "PICKS.csv"))) == n_rows)
+sent.clear(); tf.main_affiliate()
+check("v1.24: third run does not double-post, tells admin why",
+      not any(c == "PUBLIC" for c, _ in sent) and any("already made and posted" in t for _, t in sent))
 _rq.post = _orig
 
 shutil.rmtree(TMP)

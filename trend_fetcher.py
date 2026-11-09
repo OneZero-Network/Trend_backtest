@@ -1257,17 +1257,26 @@ def main_affiliate():
     last = hist["date"].max()
     if AFFILIATE_GROUPS.strip():
         return _affiliate_groups(store, hist, sig, last)
-    rejected = []
-    chosen = picks.select_picks(sig, n=BR_AFF_TOP_N, today=TODAY, rejected=rejected)
-    _report_rejected(rejected)
-    if chosen.empty:
-        send_telegram("🔍 Affiliate picks: no eligible products this week."); return
     trk = store.read("PICKS")
+    public_target = bool(AFFILIATE_CHAT_ID) and AFFILIATE_CHAT_ID.strip() != str(TELEGRAM_CHAT_ID).strip()
     if not trk.empty and (trk["pick_date"] == last).any():
-        log("Picks already recorded for this date — not duplicating"); return
-    rows = picks.make_rows(chosen, hist, last)
-    trk = pd.concat([trk, rows.astype(str)], ignore_index=True) if not trk.empty else rows
-    store.write("PICKS", trk)
+        # picks for this data date exist (forward test must not be re-drawn). If they never reached the
+        # public chat (e.g. chat id/tag were added after the first run), post them now — once.
+        if not public_target or _public_done(store, last, AFFILIATE_CHAT_ID):
+            msg = (f"🔍 Picks for {last} were already made" + (" and posted to the channel" if public_target else
+                   " (draft only — AFFILIATE_CHAT_ID not set)") + ". New picks come after the next daily fetch.")
+            log(msg); send_telegram(_esc(msg)); return
+        chosen = _recorded_picks(trk, sig, last)
+        send_telegram(f"🔁 Picks for {last} were only drafted before — posting them to the channel now (with your tag).")
+    else:
+        rejected = []
+        chosen = picks.select_picks(sig, n=BR_AFF_TOP_N, today=TODAY, rejected=rejected)
+        _report_rejected(rejected)
+        if chosen.empty:
+            send_telegram("🔍 Affiliate picks: no eligible products this week."); return
+        rows = picks.make_rows(chosen, hist, last)
+        trk = pd.concat([trk, rows.astype(str)], ignore_index=True) if not trk.empty else rows
+        store.write("PICKS", trk)
     sc = picks.scorecard(picks.update_tracking(trk, hist)) if not trk.empty else pd.DataFrame()
     line = picks.verdict(sc) if not sc.empty else ""
     msgs = picks.post_messages(chosen, hist, AFFILIATE_TAG, last, cat_names=CATEGORIES,
@@ -1287,6 +1296,7 @@ def main_affiliate():
                 time.sleep(AFFILIATE_POST_GAP_SEC)   # stay well under Telegram's channel rate limit
         finally:
             TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN = own, own_tok
+        _mark_public(store, last, AFFILIATE_CHAT_ID, len(msgs) - 1)
         send_telegram(f"🔍 Posted {len(msgs) - 1} picks to the channel. {_esc(line)}")
     else:
         send_telegram("🔍 <b>DRAFT</b> — set AFFILIATE_CHAT_ID to auto-post. Preview of the channel messages:")
@@ -1312,6 +1322,28 @@ def main_affiliate():
         send_telegram("⚠️ AFFILIATE_TAG not set — links carry no Associates tag, so they earn nothing.")
 
 
+def _recorded_picks(trk, sig, last):
+    """Picks already recorded for `last`, rebuilt as rows for post_messages (current tag is applied at post time)."""
+    rec = trk[(trk["pick_date"] == last) & (trk["role"] == "pick")]
+    base = sig.drop_duplicates("asin").set_index("asin") if not sig.empty else pd.DataFrame()
+    rows = []
+    for r in rec.to_dict("records"):
+        extra = base.loc[r["asin"]].to_dict() if r["asin"] in base.index else {}
+        rows.append({**extra, **{k: v for k, v in r.items() if k in ("asin", "title", "category_slug", "trend_score")}})
+    return pd.DataFrame(rows)
+
+
+def _public_done(store, last, chat):
+    pp = store.read("PUBLIC_POSTS")
+    return (not pp.empty) and ((pp["pick_date"] == last) & (pp["chat"].astype(str) == str(chat))).any()
+
+
+def _mark_public(store, last, chat, n):
+    pp = store.read("PUBLIC_POSTS")
+    row = pd.DataFrame([{"pick_date": last, "chat": str(chat), "posted_at": NOW_IST.strftime("%Y-%m-%d %H:%M"), "items": n}])
+    store.write("PUBLIC_POSTS", pd.concat([pp, row], ignore_index=True) if not pp.empty else row)
+
+
 def _report_rejected(rejected, top=8):
     """Admin only: high-scoring products the pick filters dropped, and why (seasonal timing, explosives)."""
     seen, lines = set(), []
@@ -1332,8 +1364,15 @@ def _affiliate_groups(store, hist, sig, last):
     if not groups:
         send_telegram("⚠️ AFFILIATE_GROUPS has no valid group — nothing posted."); return
     trk = store.read("PICKS")
-    if not trk.empty and (trk["pick_date"] == last).any():
-        log("Picks already recorded for this date — not duplicating"); return
+    already = not trk.empty and (trk["pick_date"] == last).any()
+    if already:
+        groups = [g for g in groups if not _public_done(store, last, g["chat"])]
+        if not groups:
+            send_telegram(f"🔍 Picks for {last} were already posted to every group. New picks come after the next daily fetch.")
+            return
+        sig = _recorded_picks(trk, sig, last)
+        send_telegram(f"🔁 Posting {last}'s recorded picks to groups that haven't had them: "
+                      + _esc(", ".join(g["name"] for g in groups)))
     slug = sig.get("category_slug", sig.get("category")).astype(str)
     per_group, all_chosen, rejected = [], [], []
     for g in groups:
@@ -1345,9 +1384,10 @@ def _affiliate_groups(store, hist, sig, last):
     if not all_chosen:
         send_telegram("🔍 Affiliate picks: no eligible products in any group this week."); return
     chosen = pd.concat(all_chosen, ignore_index=True)
-    rows = picks.make_rows(chosen, hist, last)           # one forward test across all groups
-    trk = pd.concat([trk, rows.astype(str)], ignore_index=True) if not trk.empty else rows
-    store.write("PICKS", trk)
+    if not already:
+        rows = picks.make_rows(chosen, hist, last)       # one forward test across all groups
+        trk = pd.concat([trk, rows.astype(str)], ignore_index=True) if not trk.empty else rows
+        store.write("PICKS", trk)
     sc = picks.scorecard(picks.update_tracking(trk, hist)) if not trk.empty else pd.DataFrame()
     line = picks.verdict(sc) if not sc.empty else ""
     report, saved = [], []
@@ -1364,6 +1404,7 @@ def _affiliate_groups(store, hist, sig, last):
                 send_telegram(m); time.sleep(AFFILIATE_POST_GAP_SEC)
         finally:
             TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN = own, own_tok
+        _mark_public(store, last, g["chat"], len(ch))
         report.append(f"• {_esc(g['name'])}: {len(ch)} picks")
     store.write("AFFILIATE_POST", pd.DataFrame(saved))
     send_telegram("🔍 <b>Group posts</b>\n" + "\n".join(report)
@@ -1570,7 +1611,7 @@ def main():
     if BR_MODE == "states":
         return main_states()
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.23 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.24 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -1707,7 +1748,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.23 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.24 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if "signals" in locals() and not signals.empty and "stock_gate" in signals:
         sg = signals["stock_gate"].astype(str)

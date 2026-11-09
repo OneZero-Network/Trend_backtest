@@ -52,6 +52,11 @@ pub = [(t, m) for c, t, m in sent if c == "@onezerodeals"]
 check("one public message per slot, via the PUBLIC bot", len(pub) == 7 and all(t == "pubtok" for t, _ in pub), len(pub))
 check("public messages carry the tag and no price", all("tag=onezeronetwor-21" in m and "₹" not in m for _, m in pub))
 check("admin gets the day's pool list once", sum("Today's post pool" in m for c, _, m in sent if c == "ADMIN") == 1)
+wa = [m for c, _, m in sent if c == "ADMIN" and "WhatsApp post of the day" in m]
+check("admin gets ONE WhatsApp post of the day with a tap-to-share link", len(wa) == 1 and "wa.me/?text=" in wa[0])
+plain = [m for c, _, m in sent if c == "ADMIN" and "OneZero Deals —" in m]
+check("WhatsApp text has a full tagged link per product (WhatsApp can't hyperlink words)",
+      plain and plain[0].count("amazon.in/dp/") == 5 and plain[0].count("tag=onezeronetwor-21") == 5, plain[:1])
 log_df = pd.read_csv(os.path.join(TMP, "AFF_POST_LOG.csv"))
 check("no product posted twice in a day", log_df["asin"].is_unique)
 check("best picks first (morning gets the top scores)", log_df["asin"].iloc[0] == "K00000001", log_df["asin"].iloc[0])

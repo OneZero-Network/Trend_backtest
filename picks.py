@@ -335,6 +335,21 @@ def share_kit(picks_df, hist, tag, today, cat_names=None):
     return out
 
 
+def wa_bundle(picks_df, hist, tag, today, cat_names=None, n=5, label=""):
+    """ONE WhatsApp post with the day's top picks. WhatsApp can't hyperlink words, so every product
+    gets its full link on its own line (WhatsApp makes it tappable)."""
+    lines = [f"*🔍 OneZero Deals — {label or today}*", "Rising on Amazon.in bestseller lists today:", ""]
+    for i, (_, p) in enumerate(picks_df.head(n).iterrows(), 1):
+        cat = p.get("category_slug") or p.get("category")
+        f = trend_facts(p["asin"], cat, hist, today)
+        cname = (cat_names or {}).get(cat, cat)
+        lines += [f"{i}. *{short_title(p['title'], 55)}*", f"📈 {_plain_line(f, cname)}",
+                  f"👉 {affiliate_link(p['asin'], tag)}", ""]
+    lines.append("_#ad · As an Amazon Associate I earn from qualifying purchases._")
+    text = "\n".join(lines)
+    return text, "https://wa.me/?text=" + _q(text)
+
+
 def kit_message(i, k):
     """Admin-chat message with one-tap buttons (Telegram HTML)."""
     return (f"<b>{i}.</b> {_h(k['x_text'].split(chr(10))[0][:80])}\n"

@@ -130,6 +130,9 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.28: WhatsApp post of the day
+When the morning pool is built, the admin chat gets **one** ready-made WhatsApp post with the top 5 picks and a tap-to-share link (choose your channel, send). The plain text follows it so you can copy it on a computer. WhatsApp can't make words clickable, so every product shows its full tagged link on its own line; copying the Telegram post into WhatsApp loses the links.
+
 ## v1.27: posts every 2 hours (drip) + separate affiliate sheet
 - **The daily fetch moves to 07:45 IST** so data is ready before the first post.
 - **New workflow "Affiliate drip posts"** runs at 9, 11, 1, 3, 5, 7 and 9 IST.

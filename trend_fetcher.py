@@ -1636,6 +1636,11 @@ def build_pool(store, astore, hist, sig, last, targets):
     astore.write("AFF_POOL", pd.concat([old, pool.astype(str)], ignore_index=True) if not old.empty else pool.astype(str))
     kit = picks.share_kit(pool.drop_duplicates("asin"), hist, AFFILIATE_TAG, last, cat_names=CATEGORIES)
     astore.write("SHARE_KIT", pd.DataFrame(kit))
+    wa_txt, wa_url = picks.wa_bundle(pool.drop_duplicates("asin"), hist, AFFILIATE_TAG, last, cat_names=CATEGORIES,
+                                     label=NOW_IST.strftime("%d %b"))
+    send_telegram(f"📲 <b>WhatsApp post of the day</b> — <a href=\"{_esc(wa_url)}\">tap here</a>, choose your channel, send. "
+                  "(On a computer: copy the text below into the channel.)")
+    send_telegram(_esc(wa_txt))
     hours = ", ".join(f"{h}:00" for h in DRIP_SLOTS_IST)
     send_telegram(f"🗓 <b>Today's post pool</b> ({last}): {len(pool)} picks · posting at {hours} IST\n"
                   + "\n".join(f"{r['order']}. {_esc(r['title'][:60])}" + (f" → {_esc(r['group'])}" if len(targets) > 1 else "")
@@ -1765,7 +1770,7 @@ def main():
     if BR_MODE == "states":
         return main_states()
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.27 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.28 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -1902,7 +1907,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.27 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.28 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if "signals" in locals() and not signals.empty and "stock_gate" in signals:
         sg = signals["stock_gate"].astype(str)

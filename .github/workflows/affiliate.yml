@@ -26,6 +26,8 @@ jobs:
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           AFFILIATE_TAG:      ${{ secrets.AFFILIATE_TAG }}
           AFFILIATE_CHAT_ID:  ${{ secrets.AFFILIATE_CHAT_ID }}
+          AFFILIATE_BOT_TOKEN: ${{ secrets.AFFILIATE_BOT_TOKEN }}
+          AFFILIATE_GROUPS:   ${{ secrets.AFFILIATE_GROUPS }}
           X_API_KEY:          ${{ secrets.X_API_KEY }}
           X_API_SECRET:       ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN:     ${{ secrets.X_ACCESS_TOKEN }}

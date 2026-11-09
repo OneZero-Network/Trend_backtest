@@ -195,6 +195,8 @@ def estimate(query, listings, amazon_price=None):
     spread = (q[2] / q[0]) if q[0] else 99
     conf = ("high" if len(prices) >= 6 and spread <= 2 else
             "medium" if len(prices) >= 4 and spread <= 3 else "low")
+    if len(query.split()) < 2:             # 1-word search ('scotch') matches anything by that brand
+        conf = "low (1-word search — type better words in 'IndiaMART search words')"
     res.update(ind_cost=round(med, 2), ind_low=round(q[0], 2), ind_high=round(q[2], 2), confidence=conf)
     return res
 

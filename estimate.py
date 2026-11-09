@@ -252,6 +252,11 @@ def analyze(asin, data, members=0, today=None, seed=7):
         blockers.append("not in today's top-100 bestsellers — wave may be over")
 
     regs, reg_src = region(data.get("GTRENDS_STATES"), title)
+    import stock_gate
+    sig = data.get("TREND_SIGNALS")
+    srow = sig[sig["asin"].astype(str) == asin] if sig is not None and "asin" in sig else pd.DataFrame()
+    gate = stock_gate.gate_all(hist, srow if not srow.empty else pd.DataFrame(
+        [{"asin": asin, "seasonal": seas_flag, "compliance": comp}]), today).get(asin, "")
 
     # confidence grade
     pts = (n_days >= 28) + (curve is not None and curve[3] >= 5 and "other" not in curve[4]) + \
@@ -268,7 +273,7 @@ def analyze(asin, data, members=0, today=None, seed=7):
             "epc": rng(epc) if price else None, "aff_3m": rng(aff) if members else None, "members": members,
             "aff_ok": aff_ok, "units_month_listing": rng(units_now), "curve": curve_src,
             "profit_unit": profit_unit, "profit_src": profit_src, "flip_3m": rng(flip),
-            "regions": regs, "region_src": reg_src, "grade": grade,
+            "regions": regs, "region_src": reg_src, "grade": grade, "stock_gate": gate,
             "assumptions": assumptions, "blockers": blockers, "comm_src": comm_src, "conv_src": conv_src}
 
 
@@ -296,7 +301,8 @@ def report(r, html=False):
           f"  Listing sells ~{rs(r['units_month_listing']).replace('₹', '')} units/month ({r['curve']})"
           if r["units_month_listing"] else f"  Units: — ({r['curve']})",
           f"  Profit/unit: ₹{r['profit_unit']:,.0f} ({r['profit_src']})" if r["profit_unit"] is not None else "  Profit/unit: —",
-          f"  You: {rs(r['flip_3m'])}" if r["flip_3m"] else "  You: — (see what's missing)"]
+          f"  You: {rs(r['flip_3m'])}" if r["flip_3m"] else "  You: — (see what's missing)",
+          f"  Stock gate: {r.get('stock_gate') or '—'}"]
     if r["regions"]:
         L += ["", b("Where it's searched most") + f" ({r['region_src']})"]
         L += [f"  {s}: interest {i}" + (" · rising" if rc and rc > 0 else "") for s, i, rc in r["regions"]]

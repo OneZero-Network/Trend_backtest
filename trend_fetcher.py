@@ -1566,7 +1566,7 @@ def main():
     if BR_MODE == "states":
         return main_states()
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.21 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.22 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -1638,6 +1638,9 @@ def main():
             signals["seasonal"] = [compliance.seasonal_flag(t) for t in signals["title"]]
             import season
             signals["season_window"] = [season.window(f, TODAY)["note"] for f in signals["seasonal"]]
+            import stock_gate
+            _g = stock_gate.gate_all(hist, signals, TODAY)
+            signals["stock_gate"] = [_g.get(str(a), "") for a in signals["asin"]]
             signals["competition"] = [compliance.competition_note(s_, b_) for s_, b_ in
                                       zip(signals.get("seller_offers", [None] * len(signals)),
                                           signals.get("bought_past_month_min", [None] * len(signals)))]
@@ -1700,8 +1703,18 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.21 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.22 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
+    if "signals" in locals() and not signals.empty and "stock_gate" in signals:
+        sg = signals["stock_gate"].astype(str)
+        ready = signals[sg.str.contains("STOCK-READY")]
+        watch = int(sg.str.startswith("👀").sum())
+        line = (f"📦 <b>Stock gate:</b> {len(ready)} ready to quote · {watch} on watch (need 14+ days in top-100)")
+        if sg.str.startswith("⏳").all():
+            line += f" · {_esc(sg.iloc[0])}"
+        for _, r in ready.head(5).iterrows():
+            line += f"\n  • {_esc(str(r['title'])[:60])}"
+        lines.append(line)
     if BAD_CATEGORIES:
         lines.append(f"⚠️ <b>Ignored in BR_CATEGORIES:</b> {_esc(', '.join(BAD_CATEGORIES))} — these are search words, "
                      f"not Amazon category slugs. Move them to <b>BR_SEED_KEYWORDS</b>.")

@@ -130,6 +130,21 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.22: stock gate + hyperlinked posts
+- **Stock gate (`stock_gate.py`).** "Never buy stock because something is rising this week." A product is ✅ STOCK-READY only if all of these hold:
+  - at least 21 days of history exist
+  - it was in the top 100 on 14 or more of the last 21 days, and was first seen at least 14 days ago
+  - its rank is not falling (last 7 days compared with the 7 before)
+  - products at its rank in that category typically stay 60 days or more
+  - for seasonal items, it's inside the stock window
+  - it isn't a firecracker
+
+  Otherwise the gate shows 👀 WATCH (with days to go), ❌ FADING, ❌ SHORT WAVES, ❌ season, or ⏳ NEED DATA. It appears in the signals, a new **"Stock gate"** column in CALCULATOR, the digest and the estimator. **Decision** now shows "WAIT — …" until the gate passes.
+- **Posts:** the product title and a "👉 Check today's price on Amazon" line are tappable links carrying your tag. No raw URL, and still no price (Associates rules).
+
+## v1.21: crash fix + 1-word search warning
+A listing showing "₹ ," with no digits crashed sourcing. Such listings are now skipped, and a failure on one product skips only that product. A one-word search is never rated above low confidence.
+
 ## v1.20: IndiaMART parser fixed
 GitHub's servers are in the US, so IndiaMART sends them to its **export site** (export.indiamart.com). Its product links look like `/products/?id=…` rather than `/proddetail/`, so every search found 0 listings. The parser now reads both layouts and was tested on the 8 real pages from 9 Nov.
 **Caveat:** export-site listings are a narrower set than the domestic directory, and prices are sellers' listed prices, not quotes. Treat the estimate as triage and confirm with real quotes.

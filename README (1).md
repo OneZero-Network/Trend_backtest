@@ -130,6 +130,10 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.20: IndiaMART parser fixed
+GitHub's servers are in the US, so IndiaMART sends them to its **export site** (export.indiamart.com). Its product links look like `/products/?id=…` rather than `/proddetail/`, so every search found 0 listings. The parser now reads both layouts and was tested on the 8 real pages from 9 Nov.
+**Caveat:** export-site listings are a narrower set than the domestic directory, and prices are sellers' listed prices, not quotes. Treat the estimate as triage and confirm with real quotes.
+
 ## v1.19: fixes from the 9 Nov logs
 - **Telegram rate limit (429).** On 9 Nov two affiliate messages and the brief were rejected and lost. Sends are now paced (1.2 s apart) and retried after Telegram's "retry after N".
 - **`BR_CATEGORIES` check.** Values with spaces ("solar light") are search words, not Amazon category slugs. They're now ignored, and the digest tells you to move them to `BR_SEED_KEYWORDS`. On 9 Nov they caused 18 blocked requests and about 10 extra minutes of captchas.

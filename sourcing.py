@@ -96,7 +96,9 @@ def parse_search(html):
     if out:
         return out
     cards, seen = [], set()
-    sel = 'a[href*="/proddetail/"]'
+    # dir.indiamart.com uses /proddetail/ links; export.indiamart.com (served to non-Indian IPs such as
+    # GitHub's US runners) uses /products/?id=… — both supported
+    sel = 'a[href*="/proddetail/"], a[href*="/products/?id="]'
     for a in soup.select(sel):
         # climb to this listing's own card: stop BEFORE a container that holds other listings,
         # otherwise a "price on request" card borrows its neighbour's price
@@ -118,7 +120,10 @@ def parse_search(html):
             continue
         um = _UNIT.search(txt[pm.end():pm.end() + 25])
         mm = _MOQ.search(txt)
-        title = a.get_text(" ", strip=True) or a.get("title", "")
+        # grid cards wrap the whole card (title + price) in the link → take the title element, not all text
+        tnode = a.select_one('span[class*="line-clamp"], [class*="title"], h2, h3')
+        title = (tnode.get_text(" ", strip=True) if tnode else a.get_text(" ", strip=True)) or a.get("title", "")
+        title = _PRICE.split(title)[0].strip() if _PRICE.search(title) else title
         if len(title) < 4:
             continue
         sup = card.select_one('[class*="company"], [class*="cmp"], [class*="supplier"]')
@@ -128,7 +133,8 @@ def parse_search(html):
                       "moq": f"{mm.group(1)} {mm.group(2) or ''}".strip() if mm else "",
                       "supplier": sup.get_text(" ", strip=True)[:80] if sup else "",
                       "city": city.get_text(" ", strip=True)[:40] if city else "",
-                      "url": a["href"] if a["href"].startswith("http") else "https://www.indiamart.com" + a["href"]})
+                      "url": a["href"] if a["href"].startswith("http") else
+                             ("https://export.indiamart.com" if "/products/?id=" in a["href"] else "https://www.indiamart.com") + a["href"]})
     return cards
 
 

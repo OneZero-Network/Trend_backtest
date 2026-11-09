@@ -1561,7 +1561,7 @@ def main():
     if BR_MODE == "states":
         return main_states()
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.19 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.20 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -1695,7 +1695,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.19 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.20 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if BAD_CATEGORIES:
         lines.append(f"⚠️ <b>Ignored in BR_CATEGORIES:</b> {_esc(', '.join(BAD_CATEGORIES))} — these are search words, "

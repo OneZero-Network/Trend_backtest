@@ -111,6 +111,13 @@ if skill:
     check("real decision still waits for your quote", v[f"{C.L['decision']}{g['B0LIGHTS01']}"].value == "NEED SOURCING QUOTE")
     check("no-match row: blank triage", v[f"{C.L['est_verdict']}{g['B0NOMATCH1']}"].value in (None, ""))
 shutil.rmtree(TMP)
+# ── v1.21: "₹ ," (no digits) crashed the 9 Nov run — must be skipped, not fatal
+_bad = ('<div><a href="/products/?id=1"><span class="line-clamp-2">Odd Item</span><p>₹ , / Piece</p></a></div>'
+        '<div><a href="/products/?id=2"><span class="line-clamp-2">Good Item</span><p>₹ 120 / Piece</p></a></div>')
+_r = S.parse_search(_bad)
+check("price without digits is skipped, rest parsed", [x["title"] for x in _r] == ["Good Item"] and _r[0]["price"] == 120.0, _r)
+
+
 # ── real page (9 Nov 2026): GitHub's US runners get export.indiamart.com, links are /products/?id=
 _h = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests_fixtures", "indiamart_export_football_2026-11-09.html"),
           encoding="utf-8", errors="ignore").read()
@@ -118,6 +125,7 @@ _L = S.parse_search(_h)
 check("export-site page parsed (was 0 listings before v1.20)", len(_L) >= 20, len(_L))
 check("export-site titles exclude the price text", all("₹" not in l["title"] for l in _L), [l["title"] for l in _L[:3]])
 check("export-site links are absolute export URLs", all(l["url"].startswith("https://export.indiamart.com/products/") for l in _L))
+check("1-word search never rated above low", S.estimate("football", _L)["confidence"].startswith("low"))
 _E = S.estimate("storm white moulded football", _L)
 check("real page gives an estimate", _E["ind_cost"] is not None and _E["matches"] >= 3, (_E["matches"], _E["confidence"]))
 

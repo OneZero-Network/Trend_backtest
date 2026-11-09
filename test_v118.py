@@ -93,4 +93,40 @@ kw = tf.product_keywords(pd.DataFrame({"title": ["Pedigree Adult Wet Dog Food Ch
                                        "trend_score": [9, 8, 7, 6, 5], "actionable": ["True"] * 5, "seasonal": [""] * 5}), n=3)
 check("state keywords are generic ('dog food'), brands dropped, no reversed duplicates", kw == ["dog food"], kw)
 
+# v1.22: stock gate
+import stock_gate as SG
+def _hist(days, rows):
+    out = []
+    for i, d in enumerate(days):
+        for asin, rk in rows(i):
+            out.append({"date": d, "list": "bestsellers", "category_slug": "kitchen", "asin": asin, "rank": rk, "title": asin})
+    return pd.DataFrame(out)
+D30 = [str((pd.Timestamp("2026-10-10") + pd.Timedelta(days=i)).date()) for i in range(30)]
+def rows(i):
+    base = [(f"F{k}", k) for k in range(1, 98)]                        # stable list → long waves
+    base.append(("STEADY", 10))                                         # in list all 30 days
+    if i >= 25: base.append(("SPIKE", 5))                               # new 5 days ago
+    base.append(("FADER", 15 if i < 23 else 60))                        # falling recently
+    return base
+Hh = _hist(D30, rows)
+sig = pd.DataFrame([{"asin": a, "seasonal": "", "compliance": ""} for a in ("STEADY", "SPIKE", "FADER")] +
+                   [{"asin": "DIYA", "seasonal": "SEASONAL: Diwali", "compliance": ""}])
+g = SG.gate_all(Hh, sig, D30[-1])
+check("steady 30-day product → STOCK-READY", g["STEADY"].startswith("✅"), g["STEADY"])
+check("5-day spike → WATCH with days to go", g["SPIKE"].startswith("👀") and "again in" in g["SPIKE"], g["SPIKE"])
+check("falling product → FADING", g["FADER"].startswith("❌ FADING"), g["FADER"])
+check("Diwali item after Diwali → NO (season)", "season" in g["DIYA"], g["DIYA"])
+g10 = SG.gate_all(Hh[Hh["date"].isin(D30[:10])], sig, D30[9])
+check("<21 days of history → NEED DATA (never READY early)", g10["STEADY"].startswith("⏳"), g10["STEADY"])
+churn = _hist(D30, lambda i: [(f"C{i}_{k}", k) for k in range(1, 99)] + [("STEADY", 10)])
+gc = SG.gate_all(churn, sig.head(1), D30[-1])
+check("category where products last ~1 day → SHORT WAVES", gc["STEADY"].startswith("❌ SHORT"), gc["STEADY"])
+
+# v1.22: affiliate post uses hyperlinks, still no price
+m = picks.post_messages(pd.DataFrame([{"asin": "B0TEST0001", "title": "Steel Bottle", "category_slug": "kitchen", "seasonal": ""}]),
+                        Hh, "tag-21", D30[-1], cat_names={"kitchen": "Home & Kitchen"})[1]
+check("title + 'Check today's price' are hyperlinks with the tag; no raw URL line; no ₹",
+      m.count('<a href="https://www.amazon.in/dp/B0TEST0001?tag=tag-21">') == 2 and "Check today's price" in m
+      and "\nhttps://" not in m and "₹" not in m, m)
+
 print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED"); sys.exit(1 if FAILS else 0)

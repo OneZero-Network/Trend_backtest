@@ -31,7 +31,7 @@ _STOP = re.compile(r"\b(for|with|and|the|of|in|to|by|men|women|girls|boys|kids|n
                    r"ft|feet|m))\b", re.I)
 _UNIT = re.compile(r"/\s*(piece|pieces|pc|pcs|nos|no|unit|units|number|pair|pairs|dozen|doz|set|sets|pack|packs|"
                    r"box|boxes|kg|kilogram|gram|g|litre|liter|l|ml|meter|metre|m|feet|ft|roll|carton|bag|bundle)\b", re.I)
-_PRICE = re.compile(r"(?:₹|Rs\.?|INR)\s*([\d,]+(?:\.\d+)?)", re.I)
+_PRICE = re.compile(r"(?:₹|Rs\.?|INR)\s*(\d[\d,]*(?:\.\d+)?)", re.I)   # must start with a digit ("₹ ," crashed v1.20)
 _OF_N = re.compile(r"\b(?:pack|set|box|combo|bundle|carton)\s*(?:of)?\s*(\d{1,4})\b|\b(\d{1,4})\s*(?:pcs|pieces|pc)\b", re.I)
 _MOQ = re.compile(r"(?:Minimum Order Quantity|MOQ)\s*[:\-]?\s*([\d,]+)\s*([A-Za-z]+)?", re.I)
 
@@ -118,6 +118,12 @@ def parse_search(html):
         pm = _PRICE.search(txt)
         if not pm:
             continue
+        try:
+            price = float(pm.group(1).replace(",", ""))
+        except ValueError:
+            continue                       # one malformed card must never stop the run
+        if price <= 0:
+            continue
         um = _UNIT.search(txt[pm.end():pm.end() + 25])
         mm = _MOQ.search(txt)
         # grid cards wrap the whole card (title + price) in the link → take the title element, not all text
@@ -128,7 +134,7 @@ def parse_search(html):
             continue
         sup = card.select_one('[class*="company"], [class*="cmp"], [class*="supplier"]')
         city = card.select_one('[class*="city"], [class*="location"], [class*="addr"]')
-        cards.append({"title": title[:150], "price": float(pm.group(1).replace(",", "")),
+        cards.append({"title": title[:150], "price": price,
                       "unit": um.group(1).lower() if um else "",
                       "moq": f"{mm.group(1)} {mm.group(2) or ''}".strip() if mm else "",
                       "supplier": sup.get_text(" ", strip=True)[:80] if sup else "",
@@ -189,6 +195,8 @@ def estimate(query, listings, amazon_price=None):
     spread = (q[2] / q[0]) if q[0] else 99
     conf = ("high" if len(prices) >= 6 and spread <= 2 else
             "medium" if len(prices) >= 4 and spread <= 3 else "low")
+    if len(query.split()) < 2:             # 1-word search ('scotch') matches anything by that brand
+        conf = "low (1-word search — type better words in 'IndiaMART search words')"
     res.update(ind_cost=round(med, 2), ind_low=round(q[0], 2), ind_high=round(q[2], 2), confidence=conf)
     return res
 

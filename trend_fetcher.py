@@ -68,6 +68,8 @@ TODAY = NOW_IST.strftime("%Y-%m-%d")
 GOOGLE_CREDS_JSON  = os.environ.get("GOOGLE_CREDS_JSON", "")
 GOOGLE_SHEET_ID    = os.environ.get("GOOGLE_SHEET_ID", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+# Public posts go through a separate bot (e.g. @OneZeroDeals_bot) when set; falls back to the admin bot.
+AFFILIATE_BOT_TOKEN = os.environ.get("AFFILIATE_BOT_TOKEN") or ""
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
 GH_REPO            = os.environ.get("GITHUB_REPOSITORY", "")
 GH_RUN_ID          = os.environ.get("GITHUB_RUN_ID", "")
@@ -1241,7 +1243,7 @@ def states_message(st, summ, today):
 
 def main_affiliate():
     """Weekly: choose picks, record same-category random baselines, draft the channel post."""
-    global TELEGRAM_CHAT_ID
+    global TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN
     log(f"🔍 BAZAAR RADAR — affiliate picks · {TODAY}")
     store = Store()
     hist = store.read(SHEET_HISTORY)
@@ -1278,12 +1280,13 @@ def main_affiliate():
                       "different chat. Showing a draft instead.")
     if public_ok:
         own, TELEGRAM_CHAT_ID = TELEGRAM_CHAT_ID, AFFILIATE_CHAT_ID
+        own_tok, TELEGRAM_BOT_TOKEN = TELEGRAM_BOT_TOKEN, AFFILIATE_BOT_TOKEN or TELEGRAM_BOT_TOKEN
         try:
             for m in msgs:                      # one message per product, like deal channels
                 send_telegram(m)
                 time.sleep(AFFILIATE_POST_GAP_SEC)   # stay well under Telegram's channel rate limit
         finally:
-            TELEGRAM_CHAT_ID = own
+            TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN = own, own_tok
         send_telegram(f"🔍 Posted {len(msgs) - 1} picks to the channel. {_esc(line)}")
     else:
         send_telegram("🔍 <b>DRAFT</b> — set AFFILIATE_CHAT_ID to auto-post. Preview of the channel messages:")
@@ -1322,7 +1325,7 @@ def _report_rejected(rejected, top=8):
 
 def _affiliate_groups(store, hist, sig, last):
     """One public group per category set: each group gets picks ONLY from its own categories."""
-    global TELEGRAM_CHAT_ID
+    global TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN
     groups, problems, unrouted = parse_affiliate_groups(AFFILIATE_GROUPS, CATEGORIES, TELEGRAM_CHAT_ID)
     for p in problems:
         send_telegram("⚠️ AFFILIATE_GROUPS: " + _esc(p))
@@ -1355,11 +1358,12 @@ def _affiliate_groups(store, hist, sig, last):
                                    week_label=f"{g['name']} · week of {last}")
         saved += [{"group": g["name"], "message": m} for m in msgs]
         own, TELEGRAM_CHAT_ID = TELEGRAM_CHAT_ID, g["chat"]
+        own_tok, TELEGRAM_BOT_TOKEN = TELEGRAM_BOT_TOKEN, AFFILIATE_BOT_TOKEN or TELEGRAM_BOT_TOKEN
         try:
             for m in msgs:
                 send_telegram(m); time.sleep(AFFILIATE_POST_GAP_SEC)
         finally:
-            TELEGRAM_CHAT_ID = own
+            TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN = own, own_tok
         report.append(f"• {_esc(g['name'])}: {len(ch)} picks")
     store.write("AFFILIATE_POST", pd.DataFrame(saved))
     send_telegram("🔍 <b>Group posts</b>\n" + "\n".join(report)
@@ -1450,7 +1454,12 @@ def main_sourcing():
         if html is None:
             blocked += 1
             continue
-        listings = sourcing.parse_search(html)
+        try:
+            listings = sourcing.parse_search(html)
+        except Exception as exc:                     # a layout surprise on one page skips that product only
+            log_tb(f"IndiaMART parse {r['asin']}", exc)
+            _dump_debug(html, f"indiamart_{r['asin']}", "search", 1)
+            continue
         if not listings:
             _dump_debug(html, f"indiamart_{r['asin']}", "search", 1)
         est = sourcing.estimate(q, listings, amazon_price=calculator._num(r.get("price")) or None)
@@ -1561,7 +1570,7 @@ def main():
     if BR_MODE == "states":
         return main_states()
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.20 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.23 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -1633,6 +1642,9 @@ def main():
             signals["seasonal"] = [compliance.seasonal_flag(t) for t in signals["title"]]
             import season
             signals["season_window"] = [season.window(f, TODAY)["note"] for f in signals["seasonal"]]
+            import stock_gate
+            _g = stock_gate.gate_all(hist, signals, TODAY)
+            signals["stock_gate"] = [_g.get(str(a), "") for a in signals["asin"]]
             signals["competition"] = [compliance.competition_note(s_, b_) for s_, b_ in
                                       zip(signals.get("seller_offers", [None] * len(signals)),
                                           signals.get("bought_past_month_min", [None] * len(signals)))]
@@ -1695,8 +1707,18 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.20 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.23 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
+    if "signals" in locals() and not signals.empty and "stock_gate" in signals:
+        sg = signals["stock_gate"].astype(str)
+        ready = signals[sg.str.contains("STOCK-READY")]
+        watch = int(sg.str.startswith("👀").sum())
+        line = (f"📦 <b>Stock gate:</b> {len(ready)} ready to quote · {watch} on watch (need 14+ days in top-100)")
+        if sg.str.startswith("⏳").all():
+            line += f" · {_esc(sg.iloc[0])}"
+        for _, r in ready.head(5).iterrows():
+            line += f"\n  • {_esc(str(r['title'])[:60])}"
+        lines.append(line)
     if BAD_CATEGORIES:
         lines.append(f"⚠️ <b>Ignored in BR_CATEGORIES:</b> {_esc(', '.join(BAD_CATEGORIES))} — these are search words, "
                      f"not Amazon category slugs. Move them to <b>BR_SEED_KEYWORDS</b>.")

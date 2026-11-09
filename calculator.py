@@ -35,6 +35,7 @@ COLS = [  # (key, header, kind)  kind: info=refreshed by fetcher · input=yours 
     ("trend_score", "Trend score", "info"), ("signal", "Signal", "info"),
     ("price", "Amazon price incl. GST (₹)", "info"), ("sellers", "Sellers on listing", "info"),
     ("bought", "Bought/month (min)", "info"), ("compliance", "Compliance", "info"), ("seasonal", "Seasonal", "info"),
+    ("stock_gate", "Stock gate (held 2–3 weeks?)", "info"),
     ("competition", "Competition note", "info"), ("url", "Amazon URL", "info"),
     ("ind_cost", "Indicative cost/pc (IndiaMART median, NOT a quote)", "info"),
     ("ind_range", "IndiaMART range P25–P75 (₹)", "info"),
@@ -139,13 +140,15 @@ def calc_formula(key, r):
         "est_verdict": (f'=IF({c["est_margin"]}="","",IF({c["est_margin"]}>={th["min_margin"]},'
                         f'"Worth requesting a quote ("&{c["ind_conf"]}&" confidence)",'
                         f'"Likely not viable at listed prices"))'),
-        "decision": (f'=IF(ISNUMBER(SEARCH("Quarantined",{c["signal"]})),"HOLD — price-dip quarantine",'
+        "decision": (f'=IF(AND({c["stock_gate"]}<>"",ISERROR(SEARCH("STOCK-READY",{c["stock_gate"]}))),'
+                     f'"WAIT — "&{c["stock_gate"]},'
+                     f'IF(ISNUMBER(SEARCH("Quarantined",{c["signal"]})),"HOLD — price-dip quarantine",'
                      f'IF(LEFT({c["seasonal"]},8)="SEASONAL","HOLD — seasonal: only if stock lands ≥2 weeks before the event",'
                      f'IF({blank},"NEED SOURCING QUOTE",'
                      f'IF({c["margin"]}<{th["min_margin"]},"NO-GO (margin)",'
                      f'IF({c["roi"]}<{th["min_roi"]},"NO-GO (ROI)",'
                      f'IF(LEFT({c["compliance"]},6)="REVIEW","HOLD — certification check first",'
-                     f'"GO — still verify compliance & sample"))))))'),
+                     f'"GO — still verify compliance & sample")))))))'),
     }
     return f[key]
 
@@ -185,7 +188,7 @@ def _row_from_signal(sig, today):
     return {"asin": g("asin"), "product": str(g("title"))[:120], "category": g("category_slug") or g("category"),
             "trend_score": g("trend_score"), "signal": g("signal"), "price": g("price_inr"),
             "sellers": g("seller_offers"), "bought": g("bought_past_month_min"),
-            "compliance": g("compliance"), "seasonal": g("seasonal"), "competition": g("competition"),
+            "compliance": g("compliance"), "seasonal": g("seasonal"), "stock_gate": g("stock_gate"), "competition": g("competition"),
             "url": g("url"),
             "last_seen": today}
 

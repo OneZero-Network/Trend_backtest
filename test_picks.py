@@ -152,6 +152,17 @@ check("share kit (one-tap X/WhatsApp buttons) goes to ADMIN only",
       and not any("Share kit" in t or "wa.me" in t for t in pub))
 check("admin chat gets the confirmation + forward-test line", any("Posted 2 picks" in t for t in adm))
 check("after posting, admin chat id is restored", tf.TELEGRAM_CHAT_ID == "ADMIN")
+check("after posting, admin bot token is restored", tf.TELEGRAM_BOT_TOKEN == "tok")
+sent.clear(); os.remove(os.path.join(TMP, "PICKS.csv"))
+urls = []
+def fake_post2(url, data=None, timeout=None, **k):
+    urls.append((url, data["chat_id"])); return _R()
+_rq.post = fake_post2; tf.AFFILIATE_BOT_TOKEN = "PUBTOK"
+tf.main_affiliate()
+check("v1.23: public posts go through the public bot, admin messages through the admin bot",
+      all("botPUBTOK/" in u for u, c in urls if c == "PUBLIC") and all("bottok/" in u for u, c in urls if c == "ADMIN")
+      and any(c == "PUBLIC" for _, c in urls))
+tf.AFFILIATE_BOT_TOKEN = ""; _rq.post = fake_post
 sent.clear(); os.remove(os.path.join(TMP, "PICKS.csv"))
 tf.AFFILIATE_CHAT_ID = "ADMIN"
 tf.main_affiliate()

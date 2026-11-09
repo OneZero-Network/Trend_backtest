@@ -1,0 +1,39 @@
+name: Bazaar Radar — Affiliate drip posts (every 2 h, 9 am–9 pm IST)
+
+# The daily fetch (7:45 IST) produces fresh data. The first drip run of the day builds a pool of
+# in-stock, rising picks (AFF_POOL tab) and records the forward test; every run posts the next 1–2.
+# No Amazon requests here — only Google Sheets + Telegram (~30 s per run).
+# Times are UTC: 03:30 … 15:30 UTC = 9 am … 9 pm IST. GitHub may start scheduled runs a few minutes late.
+on:
+  schedule:
+    - cron: "30 3-15/2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: drip
+  cancel-in-progress: false
+
+jobs:
+  drip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests pandas beautifulsoup4 gspread google-auth openpyxl
+      - name: Post next picks
+        env:
+          BR_MODE:             drip
+          GOOGLE_CREDS_JSON:   ${{ secrets.GOOGLE_CREDS_JSON }}
+          GOOGLE_SHEET_ID:     ${{ secrets.GOOGLE_SHEET_ID }}
+          AFFILIATE_SHEET_ID:  ${{ secrets.AFFILIATE_SHEET_ID }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+          AFFILIATE_TAG:       ${{ secrets.AFFILIATE_TAG }}
+          AFFILIATE_CHAT_ID:   ${{ secrets.AFFILIATE_CHAT_ID }}
+          AFFILIATE_BOT_TOKEN: ${{ secrets.AFFILIATE_BOT_TOKEN }}
+          AFFILIATE_GROUPS:    ${{ secrets.AFFILIATE_GROUPS }}
+          BR_POOL_SIZE:        ${{ vars.BR_POOL_SIZE || '12' }}
+        run: python trend_fetcher.py

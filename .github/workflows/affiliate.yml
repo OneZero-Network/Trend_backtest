@@ -1,4 +1,4 @@
-name: Bazaar Radar — Weekly affiliate picks (+ forward test) and seller brief
+name: Bazaar Radar — Weekly seller brief (picks now post via the drip workflow)
 
 # Sundays 12:30 IST, after the daily fetch. Picks are also the model's forward test:
 # each pick is tracked against random same-category products for 7/14/28 days (PICK_SCORECARD tab).
@@ -17,25 +17,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install requests pandas beautifulsoup4 gspread google-auth openpyxl tweepy
-      - name: Pick, record baseline, post
-        env:
-          BR_MODE:            affiliate
-          GOOGLE_CREDS_JSON:  ${{ secrets.GOOGLE_CREDS_JSON }}
-          GOOGLE_SHEET_ID:    ${{ secrets.GOOGLE_SHEET_ID }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-          AFFILIATE_TAG:      ${{ secrets.AFFILIATE_TAG }}
-          AFFILIATE_CHAT_ID:  ${{ secrets.AFFILIATE_CHAT_ID }}
-          AFFILIATE_BOT_TOKEN: ${{ secrets.AFFILIATE_BOT_TOKEN }}
-          AFFILIATE_GROUPS:   ${{ secrets.AFFILIATE_GROUPS }}
-          X_API_KEY:          ${{ secrets.X_API_KEY }}
-          X_API_SECRET:       ${{ secrets.X_API_SECRET }}
-          X_ACCESS_TOKEN:     ${{ secrets.X_ACCESS_TOKEN }}
-          X_ACCESS_SECRET:    ${{ secrets.X_ACCESS_SECRET }}
-          X_MAX_POSTS_PER_RUN: ${{ vars.X_MAX_POSTS_PER_RUN || '8' }}
-        run: python trend_fetcher.py
       - name: Weekly seller brief (sample for the DaaS demand test → admin chat)
-        if: always()
         env:
           BR_MODE:            brief
           GOOGLE_CREDS_JSON:  ${{ secrets.GOOGLE_CREDS_JSON }}

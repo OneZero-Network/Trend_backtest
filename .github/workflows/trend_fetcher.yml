@@ -4,7 +4,7 @@ on:
   # 09:30 IST daily (04:00 UTC). Daily, not weekday-only: e-commerce sells 7 days
   # a week, and gaps in HISTORY weaken the rank-velocity signal.
   schedule:
-    - cron: "0 4 * * *"
+    - cron: "15 2 * * *"     # 07:45 IST — data ready before the 9 am drip post
   workflow_dispatch:
     inputs:
       reason:

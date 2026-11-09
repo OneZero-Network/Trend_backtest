@@ -1450,7 +1450,12 @@ def main_sourcing():
         if html is None:
             blocked += 1
             continue
-        listings = sourcing.parse_search(html)
+        try:
+            listings = sourcing.parse_search(html)
+        except Exception as exc:                     # a layout surprise on one page skips that product only
+            log_tb(f"IndiaMART parse {r['asin']}", exc)
+            _dump_debug(html, f"indiamart_{r['asin']}", "search", 1)
+            continue
         if not listings:
             _dump_debug(html, f"indiamart_{r['asin']}", "search", 1)
         est = sourcing.estimate(q, listings, amazon_price=calculator._num(r.get("price")) or None)
@@ -1561,7 +1566,7 @@ def main():
     if BR_MODE == "states":
         return main_states()
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.20 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.21 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -1695,7 +1700,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.20 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.21 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if BAD_CATEGORIES:
         lines.append(f"⚠️ <b>Ignored in BR_CATEGORIES:</b> {_esc(', '.join(BAD_CATEGORIES))} — these are search words, "

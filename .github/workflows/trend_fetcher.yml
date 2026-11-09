@@ -39,7 +39,7 @@ jobs:
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           BR_CATEGORIES:      ${{ vars.BR_CATEGORIES }}
           BR_SEED_KEYWORDS:   ${{ vars.BR_SEED_KEYWORDS }}
-          BR_DETAIL_TOP_N:    ${{ vars.BR_DETAIL_TOP_N || '30' }}
+          BR_DETAIL_TOP_N:    ${{ vars.BR_DETAIL_TOP_N || '6' }}
           BR_CALC_TOP_N:      ${{ vars.BR_CALC_TOP_N || '25' }}
           YOUTUBE_API_KEY:    ${{ secrets.YOUTUBE_API_KEY }}
         run: python trend_fetcher.py

@@ -1,0 +1,37 @@
+name: Bazaar Radar — Opportunity estimate (on demand)
+
+# Actions → this workflow → Run workflow. Leave ASINs empty for the top 5 signals.
+# Each result: 3-month ₹ ranges (P10/P50/P90) for affiliate and for selling, wave length,
+# season window, regions, and what's missing to make it more accurate → admin Telegram + ESTIMATES tab.
+on:
+  workflow_dispatch:
+    inputs:
+      asins:
+        description: "Comma-separated ASINs (empty = top 5)"
+        required: false
+        default: ""
+      members:
+        description: "Members in the public group that would get the post (0 = per-click only)"
+        required: false
+        default: "0"
+
+jobs:
+  estimate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests pandas beautifulsoup4 gspread google-auth openpyxl
+      - name: Estimate
+        env:
+          BR_MODE:            estimate
+          BR_ESTIMATE_ASINS:  ${{ github.event.inputs.asins }}
+          AFF_MEMBERS:        ${{ github.event.inputs.members }}
+          GOOGLE_CREDS_JSON:  ${{ secrets.GOOGLE_CREDS_JSON }}
+          GOOGLE_SHEET_ID:    ${{ secrets.GOOGLE_SHEET_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python trend_fetcher.py

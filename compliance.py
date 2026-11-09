@@ -40,6 +40,9 @@ KEYWORD_RULES = [
     (r"\b(insect killer|insecticide|pesticide|mosquito (?:spray|repellent|coil|liquid|vaporizer)|cockroach|"
      r"termite|bed ?bug|fly killer|repellent|rat (?:poison|kill))\b",
      "Insecticides Act — registration (CIB&RC) & licence to sell — check"),
+    (r"\b(fire ?crackers?|green crackers?|fireworks?|sparklers?|phuljhari|anar|chakri|sky ?shots?|"
+     r"(?<!bath )bombs?|ladi|diwali line|pataka|patakha)\b",
+     "EXPLOSIVES (firecrackers) — PESO licence; Amazon restricts sale — DO NOT promote or stock"),
     (r"\b(cat food|dog food|pet food|kitten food|puppy food|pet treats?|dog treats?|cat treats?)\b",
      "Pet food — check applicable BIS / FSSAI / labelling rules"),
 ]

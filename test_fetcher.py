@@ -31,6 +31,21 @@ check("states message: per keyword 'most' + 'growing' (≥3 places), low-signal 
       and "Telangana" not in _m.split("yoga mat")[1].split("growing")[1] and "Sikkim" not in _m)
 check("states message says it's not sales", "not sales" in _m)
 
+# ── affiliate groups routing
+_cats = {"beauty": "Beauty", "apparel": "Clothing", "electronics": "Electronics", "kitchen": "Home"}
+_g, _p, _u = tf.parse_affiliate_groups("High|-100|beauty,apparel; Low|-300|electronics,beauty,bogus; Admin|-999|kitchen",
+                                       _cats, admin_chat="-999")
+check("groups parsed, slug kept in first group only",
+      [(x["name"], x["cats"]) for x in _g] == [("High", ["beauty", "apparel"]), ("Low", ["electronics"])], str(_g))
+check("admin chat refused + unknown slug + duplicate reported", len(_p) == 3, str(_p))
+check("unrouted categories listed", _u == ["kitchen"], str(_u))
+
+# ── missing-day warning
+_h = pd.DataFrame({"date": ["2026-11-01", "2026-11-02", "2026-11-04", "2026-11-07"]})
+check("missing days detected since history start (not before it)",
+      tf.missing_days(_h, "2026-11-08") == ["2026-11-03", "2026-11-05", "2026-11-06"], str(tf.missing_days(_h, "2026-11-08")))
+check("no gaps → no warning", tf.missing_days(pd.DataFrame({"date": ["2026-11-06", "2026-11-07"]}), "2026-11-08") == [])
+
 # ── circuit breaker: 3 captcha'd product pages in a row → stop asking
 calls = []
 _fh, _ns = tf.fetch_html, tf.new_session
@@ -198,7 +213,7 @@ def run_day(d):
         return organic + cut + hj + "".join(base)
     tf.fetch_html = fake; tf.new_session = lambda: None
     tf.fetch_trending_rss = lambda: []; tf.fetch_rising_queries = lambda: []
-    tf.fetch_state_interest = lambda: [
+    tf.fetch_state_interest = lambda *a: [
         {"date": tf.TODAY, "keyword": k, "state": s, "geo_code": "", "interest_3m": v, "interest_1m": v,
          "rank_3m": r, "rank_1m": r2, "rank_change": r - r2, "low_signal": v < 10}
         for k in ("air fryer", "kurti") for (s, v, r, r2) in
@@ -283,14 +298,14 @@ ss = pd.read_csv(os.path.join(TMP, "STATE_SUMMARY.csv"))
 check("state summary excludes low-signal states", "Sikkim" not in set(ss["state"]), ss["state"].tolist())
 check("rising state detected", int(ss.set_index("state").loc["Bihar", "rising_keywords"]) == 2)
 check("weekly states job labels states as search share", any("not sales" in m and "Where people are searching" in m for m in msgs))
-tf.fetch_state_interest = lambda: []
+tf.fetch_state_interest = lambda *a: []
 msgs = []; tf.send_telegram = msgs.append
 tf.main()
 check("states job survives Google returning nothing", any("no data" in m for m in msgs))
 # ── Google Sheet 403 (unshared sheet): run must continue locally, explain fix, exit 3
 import gspread
 from google.oauth2 import service_account as _sa
-tf.BR_MODE = "daily"; tf.fetch_state_interest = lambda: []
+tf.BR_MODE = "daily"; tf.fetch_state_interest = lambda *a: []
 tf.GOOGLE_CREDS_JSON = json.dumps({"type": "service_account", "client_email": "radar-bot@proj.iam.gserviceaccount.com"})
 tf.GOOGLE_SHEET_ID = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
 _orig_auth, _orig_cred = gspread.authorize, _sa.Credentials.from_service_account_info

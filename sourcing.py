@@ -187,5 +187,11 @@ def estimate(query, listings, amazon_price=None):
     return res
 
 
+def fallback_query(query):
+    """Shorter query when the full one finds <3 comparables (long Amazon-style titles over-filter)."""
+    toks = query.split()
+    return " ".join(toks[:2]) if len(toks) > 2 else ""
+
+
 def search_url(query):
     return SEARCH_URL.format(q=quote_plus(query))

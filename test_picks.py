@@ -119,7 +119,9 @@ tf.LOCAL_OUT_DIR = TMP; tf.AFFILIATE_POST_GAP_SEC = 0; tf.TODAY = day(29); tf.AF
 msgs = []; tf.send_telegram = msgs.append
 tf.main_affiliate()
 check("no channel set → DRAFT preview sent to your private chat, one message per product",
-      any("DRAFT" in m for m in msgs) and sum("Amazon Associate link" in m and "wa.me" not in m for m in msgs) == 3)
+      any("DRAFT" in m for m in msgs) and sum("Amazon Associate link" in m and "wa.me" not in m for m in msgs) == 2)
+# v1.18: run date is 30 Nov — after Diwali — so the Diwali kit is held back and the reason reported
+check("post-festival seasonal pick held back and explained", any("Not picked" in m and "Diwali" in m for m in msgs))
 check("missing tag warned (links would earn nothing)", any("AFFILIATE_TAG not set" in m for m in msgs))
 pk = pd.read_csv(os.path.join(TMP, "PICKS.csv"))
 check("picks + baselines recorded with pick date", (pk.pick_date == day(29)).all() and set(pk.role) == {"pick", "baseline"})
@@ -130,6 +132,7 @@ check("refuses to pick with < 7 days of history", any("no picks yet" in m for m 
 # ── two chats: admin gets everything internal, public gets only product posts
 H.to_csv(os.path.join(TMP, "HISTORY.csv"), index=False)
 os.remove(os.path.join(TMP, "PICKS.csv"))
+# v1.18: 30 Nov run date → Diwali kit held back (season window) → 2 picks, not 3
 sent = []
 class _R:
     status_code, text = 200, "ok"
@@ -142,12 +145,12 @@ tf.TELEGRAM_BOT_TOKEN, tf.TELEGRAM_CHAT_ID = "tok", "ADMIN"
 tf.AFFILIATE_CHAT_ID, tf.AFFILIATE_TAG = "PUBLIC", "mytag-21"
 tf.main_affiliate()
 pub = [t for c, t in sent if c == "PUBLIC"]; adm = [t for c, t in sent if c == "ADMIN"]
-check("public channel gets header + one message per product only", len(pub) == 1 + 3 and all("#ad" in t for t in pub), f"{len(pub)} public msgs")
+check("public channel gets header + one message per product only", len(pub) == 1 + 2 and all("#ad" in t for t in pub), f"{len(pub)} public msgs")
 check("public channel never sees scorecard/admin text", not any("Forward test" in t or "Posted" in t or "⚠" in t for t in pub))
 check("share kit (one-tap X/WhatsApp buttons) goes to ADMIN only",
-      any("Share kit" in t for t in adm) and sum("wa.me/?text=" in t for t in adm) == 3
+      any("Share kit" in t for t in adm) and sum("wa.me/?text=" in t for t in adm) == 2
       and not any("Share kit" in t or "wa.me" in t for t in pub))
-check("admin chat gets the confirmation + forward-test line", any("Posted 3 picks" in t for t in adm))
+check("admin chat gets the confirmation + forward-test line", any("Posted 2 picks" in t for t in adm))
 check("after posting, admin chat id is restored", tf.TELEGRAM_CHAT_ID == "ADMIN")
 sent.clear(); os.remove(os.path.join(TMP, "PICKS.csv"))
 tf.AFFILIATE_CHAT_ID = "ADMIN"

@@ -130,6 +130,29 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.18: week-1 audit fixes + opportunity estimator
+**Why:** in week 1, picks were posted on Diwali day, a likely firecracker was promoted, a product that fell in rank was picked, and IndiaMART found nothing for 30 of 30 products.
+
+- **Festival calendar (`season.py`).** A seasonal product is promoted only 30 to 3 days before its event. Our data showed Diwali items peaking about 4 days before Diwali. Stock is suggested only 45 to 120 days ahead. Lunar festival dates are set for 2026–27; **add next year's dates each October**. A festival with no future date is blocked, never silently allowed. The digest and signals show a `season_window` note.
+- **Firecracker flag.** Products are flagged "EXPLOSIVES — DO NOT promote or stock" and are never picked.
+- **Picks must have really climbed:** at least 10 places on the bestseller list. The admin chat lists high scorers that were dropped, with the reason.
+- **IndiaMART self-check.** If the full query finds fewer than 3 matches, it retries with 2 words. The message then says whether IndiaMART returned **no listings** (blocked or layout changed: send `debug/indiamart_*.html` from the artifact) or **listings that didn't match** (type search words in the calculator).
+- **Product pages:** 6 a day by default (was 30). 3 go to top signals and 3 to **sales anchors**: one category a day, products at ranks 1/5/15/35/70. Each anchor pairs a rank with Amazon's "N+ bought in past month", which is what turns ranks into units.
+- **Regions:** the weekly state run also searches 2-word generic phrases for the top 8 rising products (for example "string light"), so you see *where* a product is searched. Set `BR_STATE_PRODUCT_KW`, default 8.
+- **Opportunity estimator (`estimate.py`, workflow "Opportunity estimate").** For any ASIN, it gives a 3-month ₹ range (P10/P50/P90) for affiliate and for selling, plus wave length, season window, top states, a confidence grade A–D, and what's missing.
+  - Fill the new tabs to make it more accurate: **COMMISSION** (your rate per category), **AFF_ACTUALS** (weekly clicks, orders and earnings from Associates Central), **SALES_ANCHORS** (optional: paste "N+ bought in past month" from product pages you open).
+  - Run it on a local workbook: `python estimate.py --xlsx file.xlsx --asin B0… --members 800`.
+
+## v1.17: separate public groups by category
+Set the variable `AFFILIATE_GROUPS` to send each public Telegram group picks from its own categories only:
+```
+Fashion & Beauty|-100111|apparel,shoes,beauty,jewelry,watches,luggage; Home & Living|-100222|kitchen,home-improvement,garden,pet-supplies,sports,toys,baby; Tech & Daily|-100333|electronics,computers,automotive,grocery,hpc,books
+```
+Format: `Name|chat_id|category slugs`, with groups separated by `;`. Each category can be in only one group, and a category in no group is not posted publicly. The admin chat id is refused. You get up to `BR_AFF_TOP_N_GROUP` picks per group (default 4). One forward test covers all groups. When this is set, `AFFILIATE_CHAT_ID` is ignored. Check commission rates in Associates Central; they change.
+
+## v1.16: missing-day warning
+The admin digest lists any date in the last 14 days with no history ("🕳 Missing days"). Gaps weaken mover calculations (comparisons skip gaps over 2 days), so check GitHub Actions when you see one. GitHub may also pause scheduled workflows in inactive repos, so check its current rules.
+
 ## v1.15: data retention
 | Where | What | How long |
 |---|---|---|

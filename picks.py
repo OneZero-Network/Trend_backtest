@@ -28,10 +28,34 @@ def affiliate_link(asin, tag):
     return f"https://www.amazon.in/dp/{asin}" + (f"?tag={tag}" if tag else "")
 
 
-def select_picks(signals, n=8, max_per_cat=MAX_PER_CATEGORY):
-    """Top actionable, organic picks with category diversity. Seasonal is allowed (no stock risk
-    for affiliates) but labelled."""
+MIN_RANK_GAIN = 10        # a pick must have actually climbed ≥10 places (week 1: a product that FELL was picked)
+
+
+def select_picks(signals, n=8, max_per_cat=MAX_PER_CATEGORY, today=None, rejected=None):
+    """Top actionable, organic picks with category diversity.
+    Hard filters (reverse-logic fixes from week 1):
+      * must have climbed ≥ MIN_RANK_GAIN places on the bestseller list (not just a new-release score)
+      * seasonal only inside its promotion window (season.py) — never on/after the festival
+      * never anything flagged EXPLOSIVES
+    `rejected` (list) collects (title, reason) so the admin chat can see what was dropped."""
+    import season
     s = signals.copy()
+    rej = rejected if rejected is not None else []
+    if "compliance" in s:
+        bad = s["compliance"].astype(str).str.contains("EXPLOSIVES")
+        rej += [(t, "explosives/firecracker") for t in s.loc[bad, "title"]]
+        s = s[~bad]
+    if "rank_change" in s:
+        rc = pd.to_numeric(s["rank_change"], errors="coerce")
+        s = s[rc >= MIN_RANK_GAIN]
+    if "seasonal" in s and today is not None:
+        keep = []
+        for _, r in s.iterrows():
+            w = season.window(r.get("seasonal", ""), today)
+            keep.append(w["affiliate_ok"])
+            if not w["affiliate_ok"]:
+                rej.append((r["title"], w["note"]))
+        s = s[keep] if len(s) else s
     for col, bad in (("actionable", False), ("discount_driven", True), ("short_dip", True)):
         if col in s:
             s = s[s[col].astype(str).str.lower() != str(bad).lower()]

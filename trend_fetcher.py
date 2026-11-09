@@ -110,7 +110,7 @@ _DEFAULT_SEEDS = ("smartwatch,air fryer,sunscreen,protein powder,earbuds,saree,k
 # `or` (not a get() default): an EMPTY repo variable must also fall back to the defaults
 SEED_KEYWORDS = [k.strip() for k in (os.environ.get("BR_SEED_KEYWORDS") or _DEFAULT_SEEDS).split(",") if k.strip()]
 
-BR_DETAIL_TOP_N = int(os.environ.get("BR_DETAIL_TOP_N") or "30")   # product pages fetched per run
+BR_DETAIL_TOP_N = int(os.environ.get("BR_DETAIL_TOP_N") or "6")    # product pages per run (Amazon captchas most; keep low)
 PRODUCT_EXTRA_GAP_SEC = 4.0     # added on top of the normal throttle for /dp/ pages
 DETAIL_BLOCK_STREAK = 3         # consecutive captcha'd product pages → stop product pages for this run
 DETAIL_STATS = {}
@@ -122,9 +122,11 @@ YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 BR_YT_TOP_N     = int(os.environ.get("BR_YT_TOP_N", "15"))       # ≈101 quota units each; free quota 10,000/day
 # State trends run in their own weekly workflow (BR_MODE=states), not in the daily run:
 # ~20 rate-limited Google calls would slow the daily run and risk blocking rising-queries.
-BR_MODE         = os.environ.get("BR_MODE") or "daily"          # daily | states | sourcing | affiliate | brief
+BR_MODE         = os.environ.get("BR_MODE") or "daily"          # daily | states | sourcing | affiliate | brief | estimate
 BR_SOURCING_TOP_N   = int(os.environ.get("BR_SOURCING_TOP_N") or "20")     # products searched per run
 AFFILIATE_TAG     = os.environ.get("AFFILIATE_TAG") or ""         # your Amazon Associates tag, e.g. name-21
+AFFILIATE_GROUPS = os.environ.get("AFFILIATE_GROUPS") or ""   # per-category public groups (overrides AFFILIATE_CHAT_ID)
+BR_AFF_TOP_N_GROUP = int(os.environ.get("BR_AFF_TOP_N_GROUP") or 4)
 AFFILIATE_CHAT_ID = os.environ.get("AFFILIATE_CHAT_ID") or ""     # PUBLIC channel; drafts go to your private chat if unset
 BR_AFF_TOP_N      = int(os.environ.get("BR_AFF_TOP_N") or "8")
 BR_AFF_MIN_DAYS   = int(os.environ.get("BR_AFF_MIN_DAYS") or "7")
@@ -170,6 +172,34 @@ def _actions_url():
 
 def _esc(s):
     return _html.escape(str(s), quote=False)
+
+def parse_affiliate_groups(spec, categories, admin_chat=""):
+    """AFFILIATE_GROUPS = "Name|chat_id|slug,slug; Name2|chat_id|slug" → list of dicts.
+    Unknown slugs are dropped (reported), a slug may sit in only one group, and a group
+    whose chat is the admin chat is refused (admin data must never reach a public group)."""
+    groups, problems, seen = [], [], {}
+    for part in (spec or "").split(";"):
+        if not part.strip():
+            continue
+        bits = [b.strip() for b in part.split("|")]
+        if len(bits) != 3 or not all(bits):
+            problems.append(f"bad group entry '{part.strip()}' (need Name|chat_id|slugs)"); continue
+        name, chat, slugs = bits
+        if admin_chat and chat == str(admin_chat).strip():
+            problems.append(f"group '{name}' uses the ADMIN chat id — skipped"); continue
+        cats = []
+        for c in (x.strip() for x in slugs.split(",") if x.strip()):
+            if c not in categories:
+                problems.append(f"group '{name}': '{c}' is not a fetched category — ignored")
+            elif c in seen:
+                problems.append(f"'{c}' is in both '{seen[c]}' and '{name}' — kept in '{seen[c]}'")
+            else:
+                seen[c] = name; cats.append(c)
+        if cats:
+            groups.append({"name": name, "chat": chat, "cats": cats})
+    unrouted = [c for c in categories if c not in seen]
+    return groups, problems, unrouted
+
 
 def send_telegram(text):
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
@@ -649,6 +679,31 @@ def parse_product_page(html, asin):
     out["cod_available"] = "cash on delivery" in low or "pay on delivery" in low
     return out
 
+ANCHOR_RANKS = (1, 5, 15, 35, 70)
+
+
+def detail_targets(signals, frames, n, today):
+    """Half the product pages go to top signals (seller count for decisions), half to SALES ANCHORS:
+    one category per day (rotating), products at spread ranks 1/5/15/35/70. Their 'bought in past
+    month' + rank lets estimate.py fit a rank→sales curve per category — the base of any ₹ estimate."""
+    top = signals["asin"].head((n + 1) // 2).tolist()
+    bs = frames.get("bestsellers") if isinstance(frames, dict) else None
+    out = list(top)
+    if bs is not None and not bs.empty and "category_slug" in bs:
+        cats = sorted(bs["category_slug"].dropna().unique())
+        if cats:
+            cat = cats[pd.Timestamp(today).dayofyear % len(cats)]
+            c = bs[bs["category_slug"] == cat].copy()
+            c["rank"] = pd.to_numeric(c["rank"], errors="coerce")
+            for rk in ANCHOR_RANKS:
+                if len(out) >= n:
+                    break
+                hit = c.iloc[(c["rank"] - rk).abs().argsort()[:1]] if not c.empty else c
+                if not hit.empty and hit["asin"].iloc[0] not in out:
+                    out.append(hit["asin"].iloc[0])
+    return out[:n]
+
+
 def fetch_details(asins):
     if not asins:
         return pd.DataFrame()
@@ -683,7 +738,29 @@ def fetch_details(asins):
 # volume. We compare ranks across windows, not raw values.
 # ══════════════════════════════════════════════════════════════════════
 
-def fetch_state_interest():
+BR_STATE_PRODUCT_KW = int(os.environ.get("BR_STATE_PRODUCT_KW") or 8)
+
+
+def product_keywords(signals, n=BR_STATE_PRODUCT_KW):
+    """Generic 2-word searches for the top rising products (brand dropped, e.g. 'string light'),
+    so the weekly state run answers 'WHERE is this product wanted', not only seed topics."""
+    if signals is None or signals.empty or n <= 0:
+        return []
+    s = signals.copy()
+    s["_t"] = pd.to_numeric(s["trend_score"], errors="coerce")
+    if "actionable" in s:
+        s = s[s["actionable"].astype(str).str.lower() != "false"]
+    out = []
+    for t in s.sort_values("_t", ascending=False)["title"]:
+        kw = " ".join(sourcing.make_query(str(t)).split()[:2]).lower()
+        if len(kw) >= 5 and kw not in out:
+            out.append(kw)
+        if len(out) >= n:
+            break
+    return out
+
+
+def fetch_state_interest(keywords=None):
     if not BR_STATE_TRENDS:
         return []
     try:
@@ -695,7 +772,8 @@ def fetch_state_interest():
     except Exception as exc:
         log_tb("pytrends init failed", exc); return []
     rows = []
-    for kw in SEED_KEYWORDS:
+    kws = keywords or SEED_KEYWORDS
+    for kw in kws:
         frames = {}
         for label, tf in (("3m", "today 3-m"), ("1m", "today 1-m")):
             try:
@@ -726,7 +804,7 @@ def fetch_state_interest():
                          "rank_1m": int(r["rank_1m"]) if pd.notna(r["rank_1m"]) else None,
                          "rank_change": r["rank_change"] if pd.notna(r["rank_change"]) else None,
                          "low_signal": bool(r["low_signal"])})
-    log(f"Google Trends by state: {len(rows)} rows across {len(SEED_KEYWORDS)} keywords")
+    log(f"Google Trends by state: {len(rows)} rows across {len(kws)} keywords")
     return rows
 
 def state_summary(st):
@@ -784,6 +862,16 @@ def archive_today(name, df):
         df.to_csv(os.path.join(d, f"{name}.csv.gz"), index=False, compression="gzip")
     except Exception as exc:
         log(f"archive {name} failed: {exc}", "WARN")
+
+
+def missing_days(hist, today, window=14):
+    """Dates in the last `window` days (before today) with no bestseller history → data gaps."""
+    if hist is None or hist.empty or "date" not in hist:
+        return []
+    have = set(hist["date"].astype(str))
+    first = min(have)
+    days = [(pd.Timestamp(today) - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(1, window + 1)]
+    return sorted(d for d in days if d >= first and d not in have)
 
 
 def fill_titles(hist):
@@ -1075,7 +1163,9 @@ def main_states():
     store = Store()
     if SHEET_PROBLEM:
         send_telegram(f"📍 Bazaar Radar states — ⚠️ {_esc(SHEET_PROBLEM[0])}")
-    st = pd.DataFrame(fetch_state_interest())
+    kws = list(dict.fromkeys(product_keywords(store.read("TREND_SIGNALS")) + SEED_KEYWORDS))
+    log(f"State keywords: {', '.join(kws)}")
+    st = pd.DataFrame(fetch_state_interest(kws))
     if st.empty:
         log("No state data (Google rate-limited or pytrends missing)", "WARN")
         send_telegram(f"📍 Bazaar Radar states — no data this week. {_actions_url()}")
@@ -1119,7 +1209,11 @@ def main_affiliate():
         hist[c] = pd.to_numeric(hist[c], errors="coerce")
     sig = store.read("TREND_SIGNALS")
     last = hist["date"].max()
-    chosen = picks.select_picks(sig, n=BR_AFF_TOP_N)
+    if AFFILIATE_GROUPS.strip():
+        return _affiliate_groups(store, hist, sig, last)
+    rejected = []
+    chosen = picks.select_picks(sig, n=BR_AFF_TOP_N, today=TODAY, rejected=rejected)
+    _report_rejected(rejected)
     if chosen.empty:
         send_telegram("🔍 Affiliate picks: no eligible products this week."); return
     trk = store.read("PICKS")
@@ -1167,6 +1261,71 @@ def main_affiliate():
         errs = [t for _, t in res if t.startswith("ERROR")]
         send_telegram(f"𝕏 Auto-posted {ok_n}/{len(res)} (cap {X_MAX_POSTS_PER_RUN}/week)."
                       + (f"\n⚠️ {_esc(errs[0])}" if errs else ""))
+    if not AFFILIATE_TAG:
+        send_telegram("⚠️ AFFILIATE_TAG not set — links carry no Associates tag, so they earn nothing.")
+
+
+def _report_rejected(rejected, top=8):
+    """Admin only: high-scoring products the pick filters dropped, and why (seasonal timing, explosives)."""
+    seen, lines = set(), []
+    for t, why in rejected:
+        if t in seen:
+            continue
+        seen.add(t); lines.append(f"• {_esc(str(t)[:55])} — {_esc(why)}")
+    if lines:
+        send_telegram("🚫 <b>Not picked</b> (would have scored high):\n" + "\n".join(lines[:top]))
+
+
+def _affiliate_groups(store, hist, sig, last):
+    """One public group per category set: each group gets picks ONLY from its own categories."""
+    global TELEGRAM_CHAT_ID
+    groups, problems, unrouted = parse_affiliate_groups(AFFILIATE_GROUPS, CATEGORIES, TELEGRAM_CHAT_ID)
+    for p in problems:
+        send_telegram("⚠️ AFFILIATE_GROUPS: " + _esc(p))
+    if not groups:
+        send_telegram("⚠️ AFFILIATE_GROUPS has no valid group — nothing posted."); return
+    trk = store.read("PICKS")
+    if not trk.empty and (trk["pick_date"] == last).any():
+        log("Picks already recorded for this date — not duplicating"); return
+    slug = sig.get("category_slug", sig.get("category")).astype(str)
+    per_group, all_chosen, rejected = [], [], []
+    for g in groups:
+        ch = picks.select_picks(sig[slug.isin(g["cats"])], n=BR_AFF_TOP_N_GROUP, today=TODAY, rejected=rejected)
+        per_group.append((g, ch))
+        if not ch.empty:
+            all_chosen.append(ch)
+    _report_rejected(rejected)
+    if not all_chosen:
+        send_telegram("🔍 Affiliate picks: no eligible products in any group this week."); return
+    chosen = pd.concat(all_chosen, ignore_index=True)
+    rows = picks.make_rows(chosen, hist, last)           # one forward test across all groups
+    trk = pd.concat([trk, rows.astype(str)], ignore_index=True) if not trk.empty else rows
+    store.write("PICKS", trk)
+    sc = picks.scorecard(picks.update_tracking(trk, hist)) if not trk.empty else pd.DataFrame()
+    line = picks.verdict(sc) if not sc.empty else ""
+    report, saved = [], []
+    for g, ch in per_group:
+        if ch.empty:
+            report.append(f"• {_esc(g['name'])}: no eligible picks"); continue
+        msgs = picks.post_messages(ch, hist, AFFILIATE_TAG, last, cat_names=CATEGORIES,
+                                   week_label=f"{g['name']} · week of {last}")
+        saved += [{"group": g["name"], "message": m} for m in msgs]
+        own, TELEGRAM_CHAT_ID = TELEGRAM_CHAT_ID, g["chat"]
+        try:
+            for m in msgs:
+                send_telegram(m); time.sleep(AFFILIATE_POST_GAP_SEC)
+        finally:
+            TELEGRAM_CHAT_ID = own
+        report.append(f"• {_esc(g['name'])}: {len(ch)} picks")
+    store.write("AFFILIATE_POST", pd.DataFrame(saved))
+    send_telegram("🔍 <b>Group posts</b>\n" + "\n".join(report)
+                  + (f"\nNot in any group (not posted): {_esc(', '.join(unrouted))}" if unrouted else "")
+                  + (f"\n{_esc(line)}" if line else ""))
+    kit = picks.share_kit(chosen, hist, AFFILIATE_TAG, last, cat_names=CATEGORIES)
+    store.write("SHARE_KIT", pd.DataFrame(kit))
+    send_telegram("📣 <b>Share kit</b> — tap to open X / WhatsApp with the post pre-written.")
+    for i, k in enumerate(kit, 1):
+        send_telegram(picks.kit_message(i, k))
     if not AFFILIATE_TAG:
         send_telegram("⚠️ AFFILIATE_TAG not set — links carry no Associates tag, so they earn nothing.")
 
@@ -1247,6 +1406,16 @@ def main_sourcing():
         if not listings:
             _dump_debug(html, f"indiamart_{r['asin']}", "search", 1)
         est = sourcing.estimate(q, listings, amazon_price=calculator._num(r.get("price")) or None)
+        fq = sourcing.fallback_query(q) if not est["ind_cost"] and not r.get("search_words") else ""
+        if fq:                                            # long titles over-filter → retry with 2 words
+            h2 = fetch_html(sess_box, sourcing.search_url(fq), retries=1)
+            if h2:
+                l2 = sourcing.parse_search(h2)
+                e2 = sourcing.estimate(fq, l2, amazon_price=calculator._num(r.get("price")) or None)
+                if e2["ind_cost"]:
+                    q, url, listings, est = fq, sourcing.search_url(fq), l2, {**e2, "confidence": e2["confidence"] + " (short query)"}
+                else:
+                    est["listings_seen"] = max(est["listings_seen"], e2["listings_seen"])
         for d in est["detail"]:
             details.append({"date": TODAY, "asin": r["asin"], "query": q, **{k: d.get(k, "") for k in
                             ("title", "price", "unit", "per_piece", "unit_note", "relevance", "kept",
@@ -1270,8 +1439,17 @@ def main_sourcing():
     if updates:
         store.update_calculator([], updates)
     found = [(r, e) for r, e in summary if e["ind_cost"]]
+    seen0 = sum(1 for _, e in summary if e["listings_seen"] == 0)
+    diag = ""
+    if summary and not found:
+        diag = ("\n⚠️ <b>Diagnosis:</b> " +
+                (f"IndiaMART returned NO listings for {seen0}/{len(summary)} searches → blocked or page layout "
+                 "changed (parser). Open the run's artifact → debug/indiamart_*.html and send it to fix the parser."
+                 if seen0 >= len(summary) * 0.8 else
+                 "listings were found but none matched the product → open the SOURCING tab (relevance / unit_note) "
+                 "and type 2–3 generic words in 'IndiaMART search words' for the products you care about."))
     lines = [f"🏭 <b>IndiaMART estimates</b> — {TODAY}",
-             f"Searched {len(summary)} · estimates {len(found)} · blocked {blocked}",
+             f"Searched {len(summary)} · estimates {len(found)} · blocked {blocked} · zero-listing pages {seen0}" + diag,
              "<i>Listed prices, not quotes. Open the search, confirm product & unit, then request quotes.</i>"]
     for r, e in sorted(found, key=lambda x: calculator._num(x[0].get("price")) / max(x[1]["ind_cost"], 1),
                        reverse=True)[:8]:
@@ -1283,7 +1461,49 @@ def main_sourcing():
         sys.exit(3)
 
 
+INPUT_TABS = {
+    "COMMISSION": lambda: pd.DataFrame({"category_slug": list(CATEGORIES), "commission_pct": [""] * len(CATEGORIES),
+                                        "note": ["type your rate from Associates Central → Commission Income Statement"] * len(CATEGORIES)}),
+    "SALES_ANCHORS": lambda: pd.DataFrame([{"date": "YYYY-MM-DD", "asin": "(example — replace)", "bought_past_month": "",
+                                            "note": "open any Amazon product page from AMZ_BESTSELLERS, copy 'N+ bought in past month' (N only) with that day's date"}]),
+    "AFF_ACTUALS": lambda: pd.DataFrame([{"week": "YYYY-MM-DD", "group": "", "clicks": "", "ordered_items": "", "earnings_inr": "",
+                                          "note": "copy weekly from Associates Central reports"}]),
+}
+
+
+def ensure_input_tabs(store):
+    """Create the user-input tabs once (never overwritten)."""
+    for tab, mk in INPUT_TABS.items():
+        if store.read(tab).empty:
+            store.write(tab, mk())
+
+
+def main_estimate():
+    """On demand: 3-month earning ranges for chosen ASINs (BR_ESTIMATE_ASINS) or the top 5 signals."""
+    import estimate
+    log(f"📊 BAZAAR RADAR — opportunity estimate · {TODAY}")
+    store = Store()
+    ensure_input_tabs(store)
+    data = {t: store.read(t) for t in ("HISTORY", "TREND_SIGNALS", "DETAIL_HISTORY", "CALCULATOR", "GTRENDS_STATES",
+                                       "SALES_ANCHORS", "COMMISSION", "AFF_ACTUALS")}
+    if data["HISTORY"].empty:
+        send_telegram("📊 Estimate: no HISTORY yet."); return
+    asins = [norm_asin(a) for a in (os.environ.get("BR_ESTIMATE_ASINS") or "").replace(" ", "").split(",") if a]
+    asins = asins or estimate.top_asins(data, 5)
+    members = int(os.environ.get("AFF_MEMBERS") or 0)
+    rows = []
+    for a in asins:
+        r = estimate.analyze(a, data, members=members, today=TODAY)
+        send_telegram(estimate.report(r, html=True))
+        rows.append({"date": TODAY, **{k: (str(v) if isinstance(v, (list, tuple, dict)) else v) for k, v in r.items()}})
+    old = store.read("ESTIMATES")
+    new = pd.DataFrame(rows).astype(str)
+    store.write("ESTIMATES", pd.concat([old, new], ignore_index=True) if not old.empty else new)
+
+
 def main():
+    if BR_MODE == "estimate":
+        return main_estimate()
     if BR_MODE == "sourcing":
         return main_sourcing()
     if BR_MODE == "affiliate":
@@ -1293,7 +1513,7 @@ def main():
     if BR_MODE == "states":
         return main_states()
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.15 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.18 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -1343,7 +1563,7 @@ def main():
     # ── Product-page details for the top-N signals (MRP, discount, bought/month, sellers)
     try:
         if not signals.empty and BR_DETAIL_TOP_N > 0:
-            det = fetch_details(signals["asin"].head(BR_DETAIL_TOP_N).tolist())
+            det = fetch_details(detail_targets(signals, frames, BR_DETAIL_TOP_N, TODAY))
             if not det.empty:
                 written["AMZ_DETAILS"] = store.write("AMZ_DETAILS", det)
                 dh = store.read("DETAIL_HISTORY")
@@ -1363,6 +1583,8 @@ def main():
             signals["compliance"] = [compliance.compliance_flags(t, c) for t, c in
                                      zip(signals["title"], signals.get("category_slug", signals["category"]))]
             signals["seasonal"] = [compliance.seasonal_flag(t) for t in signals["title"]]
+            import season
+            signals["season_window"] = [season.window(f, TODAY)["note"] for f in signals["seasonal"]]
             signals["competition"] = [compliance.competition_note(s_, b_) for s_, b_ in
                                       zip(signals.get("seller_offers", [None] * len(signals)),
                                           signals.get("bought_past_month_min", [None] * len(signals)))]
@@ -1427,6 +1649,10 @@ def main():
     # ── Telegram digest
     lines = [f"📡 <b>Bazaar Radar</b> v1.15 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
+    gaps = missing_days(hist, TODAY) if "hist" in locals() else []
+    if gaps:
+        lines.append(f"🕳 <b>Missing days in history:</b> {', '.join(gaps)} — a run failed or was skipped. "
+                     f"Movers skip gaps &gt;2 days; check GitHub Actions so it doesn't happen again.")
     if DETAIL_STATS.get("skipped"):
         lines.append(f"⚠️ Amazon captcha'd product pages — stopped after {DETAIL_STATS['blocked']} blocks "
                      f"({DETAIL_STATS['skipped']} skipped). Avoid extra manual runs today.")

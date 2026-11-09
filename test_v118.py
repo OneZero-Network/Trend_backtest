@@ -129,4 +129,13 @@ check("title + 'Check today's price' are hyperlinks with the tag; no raw URL lin
       m.count('<a href="https://www.amazon.in/dp/B0TEST0001?tag=tag-21">') == 2 and "Check today's price" in m
       and "\nhttps://" not in m and "₹" not in m, m)
 
+# v1.26: sold-out items (no price on today's list) are never picked
+sigp = pd.DataFrame([
+    {"asin": "IN", "title": "Cat food 1kg", "category_slug": "pet", "trend_score": 50, "rank_change": 20, "seasonal": "", "compliance": "", "price_inr": "174"},
+    {"asin": "OUT", "title": "Trolley bag", "category_slug": "bags", "trend_score": 60, "rank_change": 90, "seasonal": "", "compliance": "", "price_inr": ""},
+])
+rj = []
+pk = picks.select_picks(sigp, n=8, today="2026-11-09", rejected=rj)
+check("no price today → not picked, reason shown", list(pk["asin"]) == ["IN"] and any("out of stock" in w for _, w in rj), (list(pk["asin"]), rj))
+
 print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED"); sys.exit(1 if FAILS else 0)

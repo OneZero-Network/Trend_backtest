@@ -128,10 +128,16 @@ YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 BR_YT_TOP_N     = int(os.environ.get("BR_YT_TOP_N", "15"))       # ≈101 quota units each; free quota 10,000/day
 # State trends run in their own weekly workflow (BR_MODE=states), not in the daily run:
 # ~20 rate-limited Google calls would slow the daily run and risk blocking rising-queries.
-BR_MODE         = os.environ.get("BR_MODE") or "daily"          # daily | states | sourcing | affiliate | brief | estimate
+BR_MODE         = os.environ.get("BR_MODE") or "daily"          # daily | states | sourcing | affiliate | brief | estimate | drip
 BR_SOURCING_TOP_N   = int(os.environ.get("BR_SOURCING_TOP_N") or "20")     # products searched per run
 AFFILIATE_TAG     = os.environ.get("AFFILIATE_TAG") or ""         # your Amazon Associates tag, e.g. name-21
-AFFILIATE_GROUPS = os.environ.get("AFFILIATE_GROUPS") or ""   # per-category public groups (overrides AFFILIATE_CHAT_ID)
+AFFILIATE_GROUPS = os.environ.get("AFFILIATE_GROUPS") or ""
+# v1.27 drip posting: one pool per data day, posted in small batches through the day
+AFFILIATE_SHEET_ID = os.environ.get("AFFILIATE_SHEET_ID") or ""     # separate Google Sheet for affiliate tabs
+BR_POOL_SIZE       = int(os.environ.get("BR_POOL_SIZE") or 12)
+BR_POOL_PER_GROUP  = int(os.environ.get("BR_POOL_PER_GROUP") or 6)
+DRIP_SLOTS_IST     = [int(h) for h in (os.environ.get("BR_DRIP_HOURS") or "9,11,13,15,17,19,21").split(",") if h.strip()]
+NO_REPEAT_DAYS     = int(os.environ.get("BR_NO_REPEAT_DAYS") or 7)   # per-category public groups (overrides AFFILIATE_CHAT_ID)
 BR_AFF_TOP_N_GROUP = int(os.environ.get("BR_AFF_TOP_N_GROUP") or 4)
 AFFILIATE_CHAT_ID = os.environ.get("AFFILIATE_CHAT_ID") or ""     # PUBLIC channel; drafts go to your private chat if unset
 BR_AFF_TOP_N      = int(os.environ.get("BR_AFF_TOP_N") or "8")
@@ -1121,9 +1127,11 @@ def _sheet_fix_hint(exc, email):
 
 
 class Store:
-    def __init__(self):
+    def __init__(self, sheet_id=None, local_dir=None):
         self.wb = None
-        if GOOGLE_CREDS_JSON and GOOGLE_SHEET_ID:
+        self.local_dir = local_dir or LOCAL_OUT_DIR
+        sheet_id = sheet_id or GOOGLE_SHEET_ID
+        if GOOGLE_CREDS_JSON and sheet_id:
             email = "(unknown — check client_email in GOOGLE_CREDS_JSON)"
             try:
                 import gspread
@@ -1131,7 +1139,7 @@ class Store:
                 info = json.loads(GOOGLE_CREDS_JSON)
                 email = info.get("client_email", email)
                 creds = Credentials.from_service_account_info(info, scopes=_SCOPES)
-                self.wb = gspread.authorize(creds).open_by_key(GOOGLE_SHEET_ID)
+                self.wb = gspread.authorize(creds).open_by_key(sheet_id)
                 log(f"Storage: Google Sheets (as {email})")
                 return
             except json.JSONDecodeError as exc:
@@ -1142,13 +1150,13 @@ class Store:
             log(f"SHEETS UNAVAILABLE → {hint}", "ERR")
             log("Continuing with local files so the Amazon fetch still runs; they are uploaded as a "
                 "workflow artifact named 'bazaar-radar-output'.", "WARN")
-        os.makedirs(LOCAL_OUT_DIR, exist_ok=True)
+        os.makedirs(self.local_dir, exist_ok=True)
         if not SHEET_PROBLEM:
             log(f"Storage: local files in ./{LOCAL_OUT_DIR} (Google secrets not set)")
 
     def read(self, tab):
         if self.wb is None:
-            p = os.path.join(LOCAL_OUT_DIR, f"{tab}.csv")
+            p = os.path.join(self.local_dir, f"{tab}.csv")
             return pd.read_csv(p, dtype=str) if os.path.exists(p) else pd.DataFrame()
         import gspread
         try:
@@ -1170,7 +1178,7 @@ class Store:
         if df is None or df.empty:
             log(f"  {tab}: nothing to write", "WARN"); return 0
         if self.wb is None:
-            df.to_csv(os.path.join(LOCAL_OUT_DIR, f"{tab}.csv"), index=False)
+            df.to_csv(os.path.join(self.local_dir, f"{tab}.csv"), index=False)
             return len(df)
         import gspread
         try:
@@ -1559,6 +1567,146 @@ def main_sourcing():
         sys.exit(3)
 
 
+# ══════════════════════════════════════════════════════════════════════
+# v1.27 DRIP POSTING — daily pool, posted in small batches 9 am–9 pm IST
+# ══════════════════════════════════════════════════════════════════════
+def affiliate_store(main_store):
+    """Affiliate tabs live in their own Google Sheet when AFFILIATE_SHEET_ID is set."""
+    if AFFILIATE_SHEET_ID and AFFILIATE_SHEET_ID != GOOGLE_SHEET_ID:
+        st = Store(AFFILIATE_SHEET_ID, local_dir=os.path.join(LOCAL_OUT_DIR, "affiliate"))
+        if st.wb is not None or not GOOGLE_CREDS_JSON:
+            return st
+        send_telegram("⚠️ AFFILIATE_SHEET_ID set but that sheet can't be opened — share it with the service "
+                      "account (Editor). Using the main sheet for now.")
+    return main_store
+
+
+def drip_targets():
+    """→ [(name, chat, cats or None)]"""
+    if AFFILIATE_GROUPS.strip():
+        groups, problems, _ = parse_affiliate_groups(AFFILIATE_GROUPS, CATEGORIES, TELEGRAM_CHAT_ID)
+        for p in problems:
+            log("AFFILIATE_GROUPS: " + p, "WARN")
+        return [(g["name"], g["chat"], g["cats"]) for g in groups]
+    if AFFILIATE_CHAT_ID and AFFILIATE_CHAT_ID.strip() != str(TELEGRAM_CHAT_ID).strip():
+        return [("Channel", AFFILIATE_CHAT_ID.strip(), None)]
+    return []
+
+
+def recently_posted(astore, days=NO_REPEAT_DAYS):
+    log_df = astore.read("AFF_POST_LOG")
+    if log_df.empty or "asin" not in log_df:
+        return set()
+    cutoff = (NOW_IST - timedelta(days=days)).strftime("%Y-%m-%d")
+    return set(log_df.loc[log_df["posted_at"].astype(str).str[:10] >= cutoff, "asin"])
+
+
+def build_pool(store, astore, hist, sig, last, targets):
+    """Pick once per data day: in stock, rising, in season, not posted in the last week. Records the
+    forward test (PICKS) once. → pool DataFrame (also written to AFF_POOL)."""
+    seen = recently_posted(astore)
+    sig2 = sig[~sig["asin"].isin(seen)] if seen else sig
+    slug = sig2.get("category_slug", sig2.get("category")).astype(str)
+    rejected, rows, chosen_all = [], [], []
+    for name, chat, cats in targets:
+        sub = sig2[slug.isin(cats)] if cats else sig2
+        ch = picks.select_picks(sub, n=BR_POOL_PER_GROUP if cats else BR_POOL_SIZE, max_per_cat=3,
+                                today=TODAY, rejected=rejected)
+        for i, (_, p) in enumerate(ch.iterrows(), 1):
+            rows.append({"date": last, "group": name, "chat": chat, "order": i, "asin": p["asin"],
+                         "title": str(p["title"])[:150], "category_slug": p.get("category_slug", ""),
+                         "seasonal": p.get("seasonal", ""), "price_inr": p.get("price_inr", ""),
+                         "trend_score": p.get("trend_score", ""), "status": "pending", "posted_at": ""})
+        if not ch.empty:
+            chosen_all.append(ch)
+    _report_rejected(rejected)
+    pool = pd.DataFrame(rows)
+    if pool.empty:
+        send_telegram(f"🗓 No eligible picks for today's post pool ({last}).")
+        return pool
+    trk = store.read("PICKS")
+    if trk.empty or not (trk["pick_date"] == last).any():
+        chosen = pd.concat(chosen_all, ignore_index=True).drop_duplicates("asin")
+        rows_t = picks.make_rows(chosen, hist, last)
+        store.write("PICKS", pd.concat([trk, rows_t.astype(str)], ignore_index=True) if not trk.empty else rows_t)
+    old = astore.read("AFF_POOL")
+    if not old.empty:
+        cutoff = (pd.Timestamp(last) - timedelta(days=14)).strftime("%Y-%m-%d")
+        old = old[(old["date"] != last) & (old["date"] >= cutoff)]
+    astore.write("AFF_POOL", pd.concat([old, pool.astype(str)], ignore_index=True) if not old.empty else pool.astype(str))
+    kit = picks.share_kit(pool.drop_duplicates("asin"), hist, AFFILIATE_TAG, last, cat_names=CATEGORIES)
+    astore.write("SHARE_KIT", pd.DataFrame(kit))
+    hours = ", ".join(f"{h}:00" for h in DRIP_SLOTS_IST)
+    send_telegram(f"🗓 <b>Today's post pool</b> ({last}): {len(pool)} picks · posting at {hours} IST\n"
+                  + "\n".join(f"{r['order']}. {_esc(r['title'][:60])}" + (f" → {_esc(r['group'])}" if len(targets) > 1 else "")
+                               for r in rows[:15]))
+    return pool
+
+
+def slots_left(now_hour):
+    return max(1, sum(1 for h in DRIP_SLOTS_IST if h >= now_hour))
+
+
+def main_drip():
+    """Runs every 2 h (9 am–9 pm IST). Builds today's pool on first run, then posts the next 1–2 picks."""
+    global TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN
+    log(f"⏱ BAZAAR RADAR — drip post · {NOW_IST.strftime('%Y-%m-%d %H:%M')} IST")
+    store = Store()
+    astore = affiliate_store(store)
+    targets = drip_targets()
+    if not targets:
+        send_telegram("⏱ Drip: no public chat set (AFFILIATE_CHAT_ID or AFFILIATE_GROUPS) — nothing posted."); return
+    hist = store.read(SHEET_HISTORY)
+    if hist.empty or hist["date"].nunique() < BR_AFF_MIN_DAYS:
+        log("Drip: not enough history yet"); return
+    hist["rank"] = pd.to_numeric(hist["rank"], errors="coerce")
+    last = hist["date"].max()
+    pool = astore.read("AFF_POOL")
+    today_pool = pool[pool["date"] == last] if not pool.empty else pool
+    if today_pool.empty:
+        today_pool = build_pool(store, astore, hist, store.read("TREND_SIGNALS"), last, targets)
+        if today_pool.empty:
+            return
+        pool = astore.read("AFF_POOL")
+    pool = pool.astype(str)
+    hour = NOW_IST.hour
+    left = slots_left(hour)
+    logs, posted_total = [], 0
+    for name, chat, _ in targets:
+        pend = pool[(pool["date"] == last) & (pool["chat"] == str(chat)) & (pool["status"] == "pending")].copy()
+        if pend.empty:
+            continue
+        pend["_o"] = pd.to_numeric(pend["order"], errors="coerce")
+        pend = pend.sort_values("_o")
+        k = -(-len(pend) // left)                       # spread what's left over the remaining slots
+        batch = pend.head(k)
+        label = f"{NOW_IST.strftime('%d %b')} · {NOW_IST.strftime('%I %p').lstrip('0')}"
+        msgs = picks.post_messages(batch, hist, AFFILIATE_TAG, last, cat_names=CATEGORIES,
+                                   week_label=label, style="single")
+        own, own_tok = TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN
+        TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN = chat, AFFILIATE_BOT_TOKEN or TELEGRAM_BOT_TOKEN
+        try:
+            for m in msgs:
+                send_telegram(m)
+        finally:
+            TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN = own, own_tok
+        stamp = NOW_IST.strftime("%Y-%m-%d %H:%M")
+        pool.loc[batch.index, "status"] = "posted"
+        pool.loc[batch.index, "posted_at"] = stamp
+        logs += [{"posted_at": stamp, "group": name, "chat": chat, "asin": r["asin"], "title": r["title"][:100],
+                  "link": picks.affiliate_link(r["asin"], AFFILIATE_TAG)} for _, r in batch.iterrows()]
+        posted_total += len(batch)
+    if not posted_total:
+        log("Drip: today's pool is fully posted"); return
+    astore.write("AFF_POOL", pool.drop(columns=[c for c in pool.columns if c.startswith("_")]))
+    old = astore.read("AFF_POST_LOG")
+    new = pd.DataFrame(logs).astype(str)
+    astore.write("AFF_POST_LOG", pd.concat([old, new], ignore_index=True) if not old.empty else new)
+    log(f"Drip: posted {posted_total} pick(s)")
+    if not AFFILIATE_TAG:
+        send_telegram("⚠️ AFFILIATE_TAG not set — drip links carry no Associates tag.")
+
+
 INPUT_TABS = {
     "COMMISSION": lambda: pd.DataFrame({"category_slug": list(CATEGORIES), "commission_pct": [""] * len(CATEGORIES),
                                         "note": ["type your rate from Associates Central → Commission Income Statement"] * len(CATEGORIES)}),
@@ -1569,11 +1717,13 @@ INPUT_TABS = {
 }
 
 
-def ensure_input_tabs(store):
-    """Create the user-input tabs once (never overwritten)."""
+def ensure_input_tabs(store, astore=None):
+    """Create the user-input tabs once (never overwritten). COMMISSION / AFF_ACTUALS → affiliate sheet."""
+    astore = astore or store
     for tab, mk in INPUT_TABS.items():
-        if store.read(tab).empty:
-            store.write(tab, mk())
+        st = astore if tab in ("COMMISSION", "AFF_ACTUALS") else store
+        if st.read(tab).empty:
+            st.write(tab, mk())
 
 
 def main_estimate():
@@ -1581,9 +1731,11 @@ def main_estimate():
     import estimate
     log(f"📊 BAZAAR RADAR — opportunity estimate · {TODAY}")
     store = Store()
-    ensure_input_tabs(store)
+    astore = affiliate_store(store)
+    ensure_input_tabs(store, astore)
     data = {t: store.read(t) for t in ("HISTORY", "TREND_SIGNALS", "DETAIL_HISTORY", "CALCULATOR", "GTRENDS_STATES",
-                                       "SALES_ANCHORS", "COMMISSION", "AFF_ACTUALS")}
+                                       "SALES_ANCHORS")}
+    data.update({t: astore.read(t) for t in ("COMMISSION", "AFF_ACTUALS")})
     if data["HISTORY"].empty:
         send_telegram("📊 Estimate: no HISTORY yet."); return
     asins = [norm_asin(a) for a in (os.environ.get("BR_ESTIMATE_ASINS") or "").replace(" ", "").split(",") if a]
@@ -1600,6 +1752,8 @@ def main_estimate():
 
 
 def main():
+    if BR_MODE == "drip":
+        return main_drip()
     if BR_MODE == "estimate":
         return main_estimate()
     if BR_MODE == "sourcing":
@@ -1611,7 +1765,7 @@ def main():
     if BR_MODE == "states":
         return main_states()
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.25 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.27 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -1748,7 +1902,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.25 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.27 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if "signals" in locals() and not signals.empty and "stock_gate" in signals:
         sg = signals["stock_gate"].astype(str)

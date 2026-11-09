@@ -48,6 +48,12 @@ def select_picks(signals, n=8, max_per_cat=MAX_PER_CATEGORY, today=None, rejecte
     if "rank_change" in s:
         rc = pd.to_numeric(s["rank_change"], errors="coerce")
         s = s[rc >= MIN_RANK_GAIN]
+    if "price_inr" in s:
+        # Amazon keeps ranking sold-out items for days (from past sales) but shows NO price for them.
+        # 9 Nov: 5 of 8 posted picks were unavailable — every one had no price on that day's list.
+        has_price = pd.to_numeric(s["price_inr"], errors="coerce").fillna(0) > 0
+        rej += [(t, "no price on today's list → probably out of stock / unavailable") for t in s.loc[~has_price, "title"]]
+        s = s[has_price]
     if "seasonal" in s and today is not None:
         keep = []
         for _, r in s.iterrows():

@@ -7,6 +7,11 @@ on:
     workflows: ["Bazaar Radar — India E-commerce Trend Fetcher"]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      recheck_days:
+        description: "Re-search products checked within this many days (0 = search again now, for testing IndiaMART)"
+        required: false
+        default: "7"
 
 jobs:
   sourcing:
@@ -30,6 +35,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           BR_SOURCING_TOP_N:  ${{ vars.BR_SOURCING_TOP_N || '20' }}
+          BR_SOURCING_RECHECK_DAYS: ${{ github.event.inputs.recheck_days || '7' }}
         run: python trend_fetcher.py
       - name: Save run output
         if: always()

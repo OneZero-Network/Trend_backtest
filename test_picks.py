@@ -7,6 +7,7 @@ TMP = tempfile.mkdtemp()
 os.environ.update({"BR_OUTPUT_DIR": TMP, "BR_CATEGORIES": "kitchen,toys"})
 import pandas as pd
 import picks as P, trend_fetcher as tf
+P.POST_STYLE = "per_product"   # legacy checks below count one message per product; v1.25 single style tested at the end
 _orig_send = tf.send_telegram
 ok = True
 def check(n, c, d=""):
@@ -184,6 +185,14 @@ check("v1.24: forward test not re-drawn (PICKS unchanged)", len(pd.read_csv(os.p
 sent.clear(); tf.main_affiliate()
 check("v1.24: third run does not double-post, tells admin why",
       not any(c == "PUBLIC" for c, _ in sent) and any("already made and posted" in t for _, t in sent))
+# v1.25: single-message style (default)
+one = P.post_messages(ch2, H, "mytag-21", day(8), cat_names={"kitchen": "Home & Kitchen", "toys": "Toys & Games"},
+                      week_label="week of " + day(8), style="single")
+check("v1.25: all picks in ONE message", len(one) == 1)
+check("v1.25: every pick is a tagged hyperlink, numbered", one[0].count('?tag=mytag-21">') == len(ch2) and "\n1. <a href" in one[0], one[0])
+check("v1.25: disclosure once, no ₹, under Telegram's 4096 limit",
+      one[0].count("#ad") == 1 and "₹" not in one[0] and len(one[0]) < 4096)
+check("v1.25: short titles cut at '|'", P.short_title("Cat Food 1kg | Ocean Fish | Hairball") == "Cat Food 1kg")
 _rq.post = _orig
 
 shutil.rmtree(TMP)

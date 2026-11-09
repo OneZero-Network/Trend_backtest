@@ -124,7 +124,7 @@ check("category where products last ~1 day → SHORT WAVES", gc["STEADY"].starts
 
 # v1.22: affiliate post uses hyperlinks, still no price
 m = picks.post_messages(pd.DataFrame([{"asin": "B0TEST0001", "title": "Steel Bottle", "category_slug": "kitchen", "seasonal": ""}]),
-                        Hh, "tag-21", D30[-1], cat_names={"kitchen": "Home & Kitchen"})[1]
+                        Hh, "tag-21", D30[-1], cat_names={"kitchen": "Home & Kitchen"}, style="per_product")[1]
 check("title + 'Check today's price' are hyperlinks with the tag; no raw URL line; no ₹",
       m.count('<a href="https://www.amazon.in/dp/B0TEST0001?tag=tag-21">') == 2 and "Check today's price" in m
       and "\nhttps://" not in m and "₹" not in m, m)

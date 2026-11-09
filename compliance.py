@@ -97,6 +97,7 @@ SEASONAL = [
     ("Ganesh Chaturthi", r"\b(ganesh chaturthi|ganpati)\b"),
     ("Eid", r"\b(eid|ramadan|ramzan)\b"),
     ("Karwa Chauth", r"\b(karwa chauth|karva chauth)\b"),
+    ("Chhath", r"\b(chhath|chhat puja|soop|supli|daura)\b"),
     ("Valentine's", r"\b(valentine)\b"),
     # decor that peaks for Diwali / Christmas / weddings even when the title names no festival
     ("Festive decor", r"\b((string|fairy|curtain|pixel|rope|waterfall|serial|diwali)\s+lights?|toran|bandhanwar|"

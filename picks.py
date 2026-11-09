@@ -206,8 +206,33 @@ def _h(x):
     return html.escape(str(x), quote=False)
 
 
-def post_messages(picks_df, hist, tag, today, cat_names=None, week_label=""):
-    """→ [header, msg1, msg2, ...] in Telegram HTML. Biggest climbers first."""
+import os as _os
+# "single" (default): ONE message, every pick a tappable name · "per_product": header + one message per product
+POST_STYLE = (_os.environ.get("AFF_POST_STYLE") or "single").strip().lower()
+
+
+def short_title(t, n=60):
+    """'Purepet Adult Dry Cat Food 1kg | Ocean Fish…' → 'Purepet Adult Dry Cat Food 1kg'."""
+    import re
+    s = re.split(r"\s[|–]\s|,\s|\s\(", str(t))[0].strip()
+    return s if len(s) <= n else s[:n - 1].rsplit(" ", 1)[0] + "…"
+
+
+def _compact_line(f):
+    now, then = f["rank_now"], f["rank_then"]
+    if now is None or pd.isna(now):
+        return "trending"
+    if then is None or pd.isna(then):
+        return f"new at #{int(now)}"
+    if then > now:
+        return f"#{int(then)} → #{int(now)}"
+    return f"holding #{int(now)}"
+
+
+def post_messages(picks_df, hist, tag, today, cat_names=None, week_label="", style=None):
+    """Telegram HTML. style 'single' → [one message]; 'per_product' → [header, msg1, msg2, ...].
+    Biggest climbers first. No prices (Associates rules)."""
+    style = (style or POST_STYLE)
     cat_names = cat_names or {}
     items = []
     for _, p in picks_df.iterrows():
@@ -217,6 +242,16 @@ def post_messages(picks_df, hist, tag, today, cat_names=None, week_label=""):
             and not pd.isna(f["rank_then"]) and not pd.isna(f["rank_now"]) else -1
         items.append((climb, p, f, cat_names.get(cat, cat)))
     items.sort(key=lambda x: x[0], reverse=True)
+    if style == "single":
+        lines = [f"🔍 <b>Hidden Amazon Finds</b> — {_h(week_label)}",
+                 "Rising on Amazon.in bestseller lists (tracked daily). Tap a name for today's price.", ""]
+        for i, (_, p, f, cname) in enumerate(items, 1):
+            seas = str(p.get("seasonal", ""))
+            tag_s = f" · 📅 {_h(seas.replace('SEASONAL: ', ''))}" if seas.startswith("SEASONAL") else ""
+            lines.append(f"{i}. <a href=\"{_h(affiliate_link(p['asin'], tag))}\">{_h(short_title(p['title']))}</a>\n"
+                         f"    📈 {_h(cname)} · {_compact_line(f)}{tag_s}")
+        lines += ["", f"<i>{_h(DISCLOSURE)}</i>"]
+        return ["\n".join(lines)]
     header = (f"🔍 <b>Hidden Amazon Finds</b> — {_h(week_label)}\n"
               f"{len(items)} products climbing Amazon.in bestseller lists, picked from daily rank tracking.\n\n"
               f"<i>{_h(DISCLOSURE)}</i>")

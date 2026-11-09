@@ -1296,8 +1296,8 @@ def main_affiliate():
                 time.sleep(AFFILIATE_POST_GAP_SEC)   # stay well under Telegram's channel rate limit
         finally:
             TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN = own, own_tok
-        _mark_public(store, last, AFFILIATE_CHAT_ID, len(msgs) - 1)
-        send_telegram(f"🔍 Posted {len(msgs) - 1} picks to the channel. {_esc(line)}")
+        _mark_public(store, last, AFFILIATE_CHAT_ID, len(chosen))
+        send_telegram(f"🔍 Posted {len(chosen)} picks to the channel in {len(msgs)} message(s). {_esc(line)}")
     else:
         send_telegram("🔍 <b>DRAFT</b> — set AFFILIATE_CHAT_ID to auto-post. Preview of the channel messages:")
         for m in msgs:
@@ -1611,7 +1611,7 @@ def main():
     if BR_MODE == "states":
         return main_states()
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.24 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.25 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -1748,7 +1748,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.24 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.25 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if "signals" in locals() and not signals.empty and "stock_gate" in signals:
         sg = signals["stock_gate"].astype(str)

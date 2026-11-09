@@ -224,10 +224,8 @@ def post_messages(picks_df, hist, tag, today, cat_names=None, week_label=""):
     for _, p, f, cname in items:
         seas = str(p.get("seasonal", ""))
         seas_line = f"\n📅 Seasonal: {_h(seas.replace('SEASONAL: ', ''))}" if seas.startswith("SEASONAL") else ""
-        link = _h(affiliate_link(p["asin"], tag))
-        # title and a button-style line are hyperlinks; no price (Associates rules: prices only via PA-API)
-        msgs.append(f"<a href=\"{link}\"><b>{_h(str(p['title'])[:110])}</b></a>\n\n{trend_line(f, _h(cname))}{seas_line}\n\n"
-                    f"👉 <a href=\"{link}\"><b>Check today's price on Amazon</b></a>\n\n<i>{SHORT_AD}</i>")
+        msgs.append(f"<b>{_h(str(p['title'])[:110])}</b>\n\n{trend_line(f, _h(cname))}{seas_line}\n\n"
+                    f"{affiliate_link(p['asin'], tag)}\n\n<i>{SHORT_AD}</i>")
     return msgs
 
 

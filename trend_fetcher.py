@@ -96,8 +96,12 @@ DEFAULT_CATEGORIES = {
     "books":            "Books",
 }
 _cat_env = (os.environ.get("BR_CATEGORIES") or "").strip()
+# Amazon category slugs look like "home-improvement" — no spaces. A value with spaces ("solar light")
+# is a search keyword pasted into the wrong variable: it can only fail (and costs ~3 min of captchas each).
+BAD_CATEGORIES = [c.strip() for c in _cat_env.split(",") if c.strip() and not re.fullmatch(r"[a-z0-9-]+", c.strip())]
 CATEGORIES = ({c.strip(): DEFAULT_CATEGORIES.get(c.strip(), c.strip())
-               for c in _cat_env.split(",") if c.strip()} if _cat_env else DEFAULT_CATEGORIES)
+               for c in _cat_env.split(",") if c.strip() and c.strip() not in BAD_CATEGORIES}
+              if _cat_env else DEFAULT_CATEGORIES) or DEFAULT_CATEGORIES
 
 LISTS = {
     "bestsellers":       "https://www.amazon.in/gp/bestsellers/{slug}/",
@@ -201,13 +205,37 @@ def parse_affiliate_groups(spec, categories, admin_chat=""):
     return groups, problems, unrouted
 
 
+_tg_last = [0.0]
+TG_GAP_SEC = 1.2          # Telegram: ~1 msg/s per chat, ~20/min per group — pace instead of getting 429
+
+
+def _tg_post(url, **kw):
+    """POST to Telegram, pacing sends and honouring 429 'retry after N' (up to 3 tries) so messages aren't lost."""
+    r = None
+    for attempt in range(4):
+        wait = _tg_last[0] + TG_GAP_SEC - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        r = requests.post(url, **kw)
+        _tg_last[0] = time.time()
+        if r.status_code != 429 or attempt == 3:
+            return r
+        try:
+            ra = int(r.json().get("parameters", {}).get("retry_after", 5))
+        except Exception:
+            ra = 5
+        log(f"Telegram rate limit — waiting {min(ra, 60) + 1}s and retrying", "WARN")
+        time.sleep(min(ra, 60) + 1)
+    return r
+
+
 def send_telegram(text):
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         log("Telegram not configured — skipping alert", "DBG")
         return
     for chunk in [text[i:i+3900] for i in range(0, len(text), 3900)]:
         try:
-            r = requests.post(
+            r = _tg_post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                 data={"chat_id": TELEGRAM_CHAT_ID, "text": chunk,
                       "parse_mode": "HTML", "disable_web_page_preview": "true"},
@@ -215,7 +243,7 @@ def send_telegram(text):
             if r.status_code == 400 and "parse entities" in r.text:
                 # never lose the digest to one bad character: resend as plain text
                 plain = re.sub(r"<[^>]+>", "", chunk).replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
-                r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                r = _tg_post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                                   data={"chat_id": TELEGRAM_CHAT_ID, "text": plain,
                                         "disable_web_page_preview": "true"}, timeout=20)
                 log("Telegram: HTML rejected, sent as plain text", "WARN")
@@ -750,10 +778,26 @@ def product_keywords(signals, n=BR_STATE_PRODUCT_KW):
     s["_t"] = pd.to_numeric(s["trend_score"], errors="coerce")
     if "actionable" in s:
         s = s[s["actionable"].astype(str).str.lower() != "false"]
+    # generic words = words that appear in many different titles ("string", "light", "bottle");
+    # brand/model words ("tekcool", "parabola", "boomers") appear in one or two → dropped
+    import season as _season
+    df = {}
+    for t in signals["title"].dropna().astype(str):
+        for w in set(re.findall(r"[a-z]{3,}", t.lower())):
+            df[w] = df.get(w, 0) + 1
+    stop = {"for", "with", "and", "the", "pack", "set", "men", "women", "kids", "home", "use", "inch", "size",
+            "black", "white", "blue", "red", "green", "pcs", "piece", "pieces", "combo", "new", "large", "small",
+            "medium", "premium", "quality", "multicolor", "multicolour", "free", "best", "gift", "warm", "colour", "color"}
     out = []
-    for t in s.sort_values("_t", ascending=False)["title"]:
-        kw = " ".join(sourcing.make_query(str(t)).split()[:2]).lower()
-        if len(kw) >= 5 and kw not in out:
+    for _, r in s.sort_values("_t", ascending=False).iterrows():
+        if "EXPLOSIVES" in str(r.get("compliance", "")) or not _season.window(r.get("seasonal", ""), TODAY)["affiliate_ok"]:
+            continue
+        words = [w for w in re.findall(r"[a-z]{3,}", str(r["title"]).lower().split("|")[0])
+                 if w not in stop and df.get(w, 0) >= 4]
+        uniq = list(dict.fromkeys(words))
+        top2 = sorted(sorted(uniq, key=lambda w: -df[w])[:2], key=uniq.index)   # 2 most generic, title order
+        kw = " ".join(top2)
+        if len(kw) >= 5 and sorted(kw.split()) not in [sorted(o.split()) for o in out]:
             out.append(kw)
         if len(out) >= n:
             break
@@ -1335,9 +1379,10 @@ def send_telegram_document(path, caption=""):
         return
     try:
         with open(path, "rb") as fh:
-            r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
-                              data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
-                              files={"document": (os.path.basename(path), fh, "text/html")}, timeout=60)
+            blob = fh.read()
+        r = _tg_post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
+                     data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
+                     files={"document": (os.path.basename(path), blob, "text/html")}, timeout=60)
         if r.status_code != 200:
             log(f"Telegram document HTTP {r.status_code}: {r.text[:200]}", "WARN")
     except Exception as exc:
@@ -1383,7 +1428,10 @@ def main_sourcing():
         recent = set(hist.loc[hist["date"] >= cutoff, "asin"])
     import workbook_tabs
     quoted = workbook_tabs.quoted_asins(store.wb, os.path.join(LOCAL_OUT_DIR, "CALCULATOR.xlsx"))
-    todo = [r for r in rows if r.get("asin") and not calculator.has_quote(r, quoted) and r["asin"] not in recent]
+    import season
+    todo = [r for r in rows if r.get("asin") and not calculator.has_quote(r, quoted) and r["asin"] not in recent
+            and season.window(r.get("seasonal", ""), TODAY)["stock_ok"]
+            and "EXPLOSIVES" not in str(r.get("compliance", ""))]
     # seasonal and quarantined rows last — least likely to be bought
     todo.sort(key=lambda r: (str(r.get("seasonal", "")).startswith("SEASONAL"),
                              "Quarantined" in str(r.get("signal", "")), -calculator._num(r.get("trend_score"))))
@@ -1513,7 +1561,7 @@ def main():
     if BR_MODE == "states":
         return main_states()
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.18 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.19 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -1647,8 +1695,11 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.15 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.19 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
+    if BAD_CATEGORIES:
+        lines.append(f"⚠️ <b>Ignored in BR_CATEGORIES:</b> {_esc(', '.join(BAD_CATEGORIES))} — these are search words, "
+                     f"not Amazon category slugs. Move them to <b>BR_SEED_KEYWORDS</b>.")
     gaps = missing_days(hist, TODAY) if "hist" in locals() else []
     if gaps:
         lines.append(f"🕳 <b>Missing days in history:</b> {', '.join(gaps)} — a run failed or was skipped. "

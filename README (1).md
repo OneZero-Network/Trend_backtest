@@ -130,6 +130,13 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.19: fixes from the 9 Nov logs
+- **Telegram rate limit (429).** On 9 Nov two affiliate messages and the brief were rejected and lost. Sends are now paced (1.2 s apart) and retried after Telegram's "retry after N".
+- **`BR_CATEGORIES` check.** Values with spaces ("solar light") are search words, not Amazon category slugs. They're now ignored, and the digest tells you to move them to `BR_SEED_KEYWORDS`. On 9 Nov they caused 18 blocked requests and about 10 extra minutes of captchas.
+- **State keywords are generic** ("dog food", "travel bag", "wall decor", "hard water"). They're chosen as the words shared by many product titles, so brand names drop out. Seasonal items outside their window and firecrackers are skipped.
+- **Sourcing** skips products out of their stock window, so Diwali items are no longer searched after Diwali, and skips firecrackers.
+- The digest header shows the correct version.
+
 ## v1.18: week-1 audit fixes + opportunity estimator
 **Why:** in week 1, picks were posted on Diwali day, a likely firecracker was promoted, a product that fell in rank was picked, and IndiaMART found nothing for 30 of 30 products.
 

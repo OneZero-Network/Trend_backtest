@@ -43,10 +43,7 @@ bs = pd.DataFrame({"category_slug": ["garden"] * 100, "rank": list(range(1, 101)
 t = tf.detail_targets(pd.DataFrame({"asin": ["S1", "S2", "S3", "S4"]}), {"bestsellers": bs}, 6, "2026-11-09")
 check("detail targets = 3 top signals + 3 spread-rank anchors", t == ["S1", "S2", "S3", "G1", "G5", "G15"], t)
 
-# product keywords for state run
-pk = tf.product_keywords(pd.DataFrame({"title": ["Desidiya 12 Star String Light Warm White", "Pedigree Adult Wet Dog Food"],
-                                       "trend_score": [50, 40], "actionable": ["True", "True"]}), n=5)
-check("product keywords are short generic phrases", len(pk) == 2 and all(len(k.split()) <= 2 for k in pk), pk)
+# product keywords: superseded in v1.19 by the generic-word test at the end (needs ≥4 titles per word)
 
 # estimator on synthetic data: anchors at ranks 1/10/50 → curve; product at rank 10
 days = [f"2026-11-{d:02d}" for d in range(1, 11)]
@@ -70,5 +67,30 @@ r2 = estimate.analyze("K10", data, members=1000, today="2026-11-10")
 check("filled commission replaces the assumption", "commission 2–8%" not in r2["assumptions"])
 check("unknown ASIN handled", "error" in estimate.analyze("NOPE", data))
 check("report renders", "P10 / P50 / P90" in estimate.report(r))
+
+# v1.19: Telegram 429 retry honours retry_after, then succeeds
+import requests as _rq
+calls = []
+class _R:
+    def __init__(s, c): s.status_code = c; s.text = ""
+    def json(s): return {"parameters": {"retry_after": 0}}
+seq = iter([429, 200])
+_orig_post, _orig_sleep = _rq.post, tf.time.sleep
+_rq.post = lambda *a, **k: (calls.append(1), _R(next(seq)))[1]
+tf.time.sleep = lambda s: None
+r = tf._tg_post("u", data={})
+_rq.post, tf.time.sleep = _orig_post, _orig_sleep
+check("Telegram 429 → waits and retries instead of losing the message", r.status_code == 200 and len(calls) == 2)
+
+# v1.19: keyword in BR_CATEGORIES is rejected
+import subprocess
+out = subprocess.run([sys.executable, "-c", "import trend_fetcher as t; print(sorted(t.CATEGORIES), t.BAD_CATEGORIES)"],
+                     env={**os.environ, "BR_CATEGORIES": "kitchen,solar light,wall decor"}, capture_output=True, text=True).stdout
+check("search words in BR_CATEGORIES ignored + reported", "['kitchen'] ['solar light', 'wall decor']" in out, out)
+
+kw = tf.product_keywords(pd.DataFrame({"title": ["Pedigree Adult Wet Dog Food Chicken", "Drools Dog Food Adult", "Purepet Dog Food",
+                                                 "Royal Dog Food Puppy", "Tekcool Umbrella Big"],
+                                       "trend_score": [9, 8, 7, 6, 5], "actionable": ["True"] * 5, "seasonal": [""] * 5}), n=3)
+check("state keywords are generic ('dog food'), brands dropped, no reversed duplicates", kw == ["dog food"], kw)
 
 print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED"); sys.exit(1 if FAILS else 0)

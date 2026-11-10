@@ -130,6 +130,13 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.33: discovery seeds fixed (fewer films and news, more real products)
+On 10 Nov, the broad seeds ("flipkart", "amazon", "course", "software") produced films, K-pop news, a local tutor and a forensics company. The daily fetch's specific seeds found real products the same day ("hot lunch box for office" +144,800%).
+- **Specific seeds, rotated daily:** 42 product types (10 a day), 25 skills (5 a day) and 25 software types (5 a day), defined in `discovery.py` (PRODUCT_SEEDS, SKILL_SEEDS, APP_SEEDS). Up to 3 growing seeds go first.
+- **Results must be about their seed:** they share a seed word. In apps, comparison searches ("capcut alternative", "X vs Y") also count.
+- **More blocked words:** release date, OTT/streaming names, box office, cast; university and college names in skills; jobs, hiring, salary, lawsuits and breaches in apps.
+- **Unnamed YouTube products** (links without a name in the address) show the video's title as a label.
+
 ## v1.32: stock analysis is admin-only, with an early preview
 - **The seller brief no longer includes the stock-ready list.** That's your edge. It goes to the admin chat only ("🔒 Stock-ready, admin only").
 - **Admin preview:** while there are fewer than 21 days of history, the digest's 📦 Stock gate line adds "🔒 Admin preview", which applies the same tests scaled to the days available (in the top 100 on at least ⅔ of them). It's less reliable and **never changes the calculator's Decision**, which keeps the real 21-day gate. Turn it off with `BR_STOCK_PREVIEW=0`.

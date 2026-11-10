@@ -17,7 +17,7 @@ check("news / service searches rejected", not D.is_product_phrase("flipkart big 
       and not D.is_product_phrase("amazon customer care number") and not D.is_product_phrase("ipl score today"))
 check("product searches kept", D.is_product_phrase("hot lunch box for office") and D.is_product_phrase("meesho kurti set"))
 check("Breakout counts as a big rise", D.rise_value("Breakout") >= 5000 and D.rise_value("+350%") == 350)
-rows = D.trends_rows([("air fryer flipkart", "Breakout"), ("flipkart login", 900), ("steel bottle", 100)], "flipkart", "2026-11-10")
+rows = D.trends_rows([("air fryer flipkart", "Breakout"), ("air fryer login", 900), ("air fryer basket", 100)], "air fryer", "2026-11-10")
 check("trends rows: weak rises and non-products dropped", [r["phrase"] for r in rows] == ["air fryer"], rows)
 
 # ── links: only the redirect ADDRESS is read
@@ -63,8 +63,8 @@ check("day 2 → lunch box promoted; first_seen kept", b2["q:hot lunch box"]["st
 # ── seeds grow and expire
 s1 = D.update_seeds([], [{"phrase": "air fryer", "rise": 5000}, {"phrase": "mat", "rise": 5000}], "2026-11-10")
 check("strong 2-word phrase becomes a seed; 1-word doesn't", [r["seed"] for r in s1] == ["air fryer"], s1)
-check("active for 7 days", "air fryer" in D.active_seeds(s1, "2026-11-16") and "air fryer" not in D.active_seeds(s1, "2026-11-19"))
-check("base seeds always present", D.active_seeds([], "2026-11-10")[:3] == ["flipkart", "amazon", "meesho"])
+check("active for 7 days", "air fryer" in D.active_seeds(s1, "2026-11-16", base=["x"]) and "air fryer" not in D.active_seeds(s1, "2026-11-19", base=["x"]))
+check("growing seeds go first, then today's slice", D.active_seeds(s1, "2026-11-11", base=["lunch box", "mop"]) == ["air fryer", "lunch box", "mop"])
 
 # ── lead test: found 10 Nov (not on Amazon), appears on Amazon 15 Nov → 5-day lead
 disc = [{"date": "2026-11-10", "item_key": "q:neck fan", "kind": "phrase", "name": "neck fan", "product_id": "", "sources": "gtrends"},
@@ -86,7 +86,8 @@ check("banned everywhere: betting, real-money games, loan apps, trading, piracy"
               ("aviator game", "apps")]))
 check("exam results / jobs aren't skills", not D.is_product_phrase("ssc cgl result", "skills")
       and not D.is_product_phrase("data entry job", "skills") and D.is_product_phrase("python course", "skills"))
-sk = D.trends_rows([("python course for beginners", "Breakout"), ("power bi course", 600)], "course", "2026-11-10", lane="skills")
+sk = D.trends_rows([("python course for beginners", "Breakout")], "python", "2026-11-10", lane="skills") + \
+     D.trends_rows([("power bi course", 600)], "power bi", "2026-11-10", lane="skills")
 check("skill rows carry their lane", [(r["phrase"], r["lane"]) for r in sk] == [("python", "skills"), ("power bi", "skills")], sk)
 ytp = D.yt_phrase_check({"python": [{"channel": c, "published": "2026-11-01T00:00:00Z", "views": 9000} for c in ("a", "b", "c")],
                          "power bi": [{"channel": "a", "published": "2026-11-01T00:00:00Z", "views": 9000}]}, now=now)
@@ -98,8 +99,28 @@ check("skill confirmed by Trends + 3 YouTube channels → 2+ sources; own key pr
 check("skills never matched against Amazon lists", all("amazon_list" not in r["sources"] for r in cs))
 seeds_all = D.update_seeds([], [{"phrase": "power bi", "rise": 5000, "lane": "skills"},
                                 {"phrase": "air fryer", "rise": 5000}], "2026-11-10")
-check("growing seeds stay in their own lane", "power bi" in D.active_seeds(seeds_all, "2026-11-11", D.lane_seeds("skills"), "skills")
+check("growing seeds stay in their own lane", "power bi" in D.active_seeds(seeds_all, "2026-11-11", ["excel"], "skills")
       and "power bi" not in D.active_seeds(seeds_all, "2026-11-11"))
+
+# ── v1.33: the 10 Nov noise must be rejected; the 10 Nov real products kept
+noise = [("jailer 2 prime release date", "amazon", "products"), ("iphone 17 pro diwali", "flipkart", "products"),
+         ("namjooning stanford", "course", "skills"), ("mehul sir tuition ahmedabad", "classes", "skills"),
+         ("jobs hunt stripe engineer", "software", "apps"), ("cellebrite", "software", "apps")]
+check("10 Nov noise rejected (not about its seed, or film/job/news)",
+      not any(D.trends_rows([(q, 5000)], sd, "2026-11-10", lane=ln) for q, sd, ln in noise),
+      [q for q, sd, ln in noise if D.trends_rows([(q, 5000)], sd, "2026-11-10", lane=ln)])
+real = [("hot lunch box for office", "lunch box", "products"), ("self heating lunch box", "lunch box", "products"),
+        ("folding storage box", "storage box", "products"), ("excel copilot", "excel", "skills"),
+        ("capcut alternative", "video editor", "apps"), ("ai video editor free", "video editor", "apps")]
+kept = {q: D.trends_rows([(q, 5000)], sd, "2026-11-10", lane=ln) for q, sd, ln in real}
+check("real product / skill / app searches kept", all(kept.values()), [q for q, v in kept.items() if not v])
+check("rotation: different slice daily, whole list covered",
+      D.lane_seeds("products", "2026-11-10") != D.lane_seeds("products", "2026-11-11")
+      and set().union(*[D.lane_seeds("products", f"2026-11-{d:02d}") for d in range(10, 16)]) == set(D.PRODUCT_SEEDS))
+nm = D.youtube_rows([{"id": "v1", "channel": "c1", "title": "10 Amazon Kitchen Gadgets Under 500",
+                      "description": "https://www.amazon.in/dp/B0NONAME01", "views": 100, "published": "2026-11-08T00:00:00Z"}],
+                    lambda u: None, "2026-11-10", now=now)
+check("unnamed YouTube product gets the video title as a label", nm[0]["name"].startswith("(unnamed — from video: 10 Amazon Kitchen"), nm)
 
 # ── release gates
 hist_rows = []

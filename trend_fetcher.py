@@ -1863,7 +1863,7 @@ def main_discover():
     store = Store()
     seed_tab = store.read("DISC_SEEDS")
     seed_rows = seed_tab.to_dict("records") if not seed_tab.empty else []
-    seeds_by = {lane: discovery.active_seeds(seed_rows, TODAY, base=discovery.lane_seeds(lane), lane=lane)
+    seeds_by = {lane: discovery.active_seeds(seed_rows, TODAY, base=discovery.lane_seeds(lane, TODAY), lane=lane)
                 for lane in discovery.LANES}
     seeds = seeds_by["products"]
     for lane, sd in seeds_by.items():
@@ -1997,7 +1997,7 @@ def main():
             log(f"Backup schedule: today's data ({TODAY}) already fetched — skipping (avoids extra Amazon requests)")
             return
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.32 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.33 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -2134,7 +2134,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.32 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.33 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if "signals" in locals() and not signals.empty and "stock_gate" in signals:
         sg = signals["stock_gate"].astype(str)

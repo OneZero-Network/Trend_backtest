@@ -19,7 +19,41 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote
 
 # ── Google Trends seeds ───────────────────────────────────────────────
-BASE_SEEDS = ["flipkart", "amazon", "meesho", "under 500", "under 1000", "gift for"]
+# v1.33: SPECIFIC nouns, rotated daily. Broad seeds ("flipkart", "course", "software") pulled in films,
+# celebrity news and sale dates (10 Nov: "jailer 2 prime release date", "namjooning stanford").
+# Specific seeds produced real products the same day ("hot lunch box for office" +144,800%).
+PRODUCT_SEEDS = ["lunch box", "water bottle", "storage box", "air fryer", "electric kettle", "mixer grinder",
+                 "cookware set", "bedsheet", "curtains", "wall decor", "table lamp", "mop", "vacuum cleaner",
+                 "air purifier", "room heater", "yoga mat", "dumbbells", "cycle", "backpack", "trolley bag",
+                 "dog food", "cat food", "plant pots", "garden tools", "power bank", "earbuds", "smart watch",
+                 "phone stand", "led bulb", "extension board", "kurti", "saree", "sneakers", "wallet", "perfume",
+                 "face serum", "hair dryer", "trimmer", "toys", "school bag", "gift hamper", "organizer"]
+SKILL_SEEDS = ["excel", "python", "data analytics", "digital marketing", "spoken english", "graphic design",
+               "video editing", "artificial intelligence", "photography", "tally", "ui ux", "cyber security",
+               "cloud computing", "sql", "power bi", "canva", "ielts", "web development", "java", "autocad",
+               "content writing", "public speaking", "machine learning", "prompt engineering", "seo"]
+APP_SEEDS = ["video editor", "photo editor", "pdf editor", "vpn", "password manager", "crm", "accounting software",
+             "website builder", "ai image generator", "ai chatbot", "note taking", "project management",
+             "antivirus", "screen recorder", "email marketing", "invoice", "ai voice", "presentation",
+             "background remover", "resume builder", "online meeting", "cloud storage", "ai writing", "scheduling",
+             "inventory software"]
+SEEDS_PER_DAY = {"products": 10, "skills": 5, "apps": 5}
+BASE_SEEDS = PRODUCT_SEEDS                      # kept for compatibility
+
+
+def rotate(pool, n, today):
+    """Different slice each day; the whole list is covered every len(pool)/n days."""
+    if not pool:
+        return []
+    k = datetime.fromisoformat(str(today)[:10]).toordinal() * n
+    return [pool[(k + i) % len(pool)] for i in range(min(n, len(pool)))]
+
+
+def about_seed(query, seed):
+    """The rising search must actually be about its seed (share a seed word ≥3 letters)."""
+    q = set(re.findall(r"[a-z0-9]+", str(query).lower()))
+    words = [w for w in re.findall(r"[a-z0-9]+", str(seed).lower()) if len(w) >= 3] or [str(seed).lower()]
+    return any(w in q or any(t.startswith(w[:5]) for t in q if len(w) >= 6) for w in words)
 SNOWBALL_DAYS = 7
 MAX_SNOWBALL = 8
 MIN_RISE = 250                      # % rise; "Breakout" counts. Huge % from ~0 is filtered by 2-day persistence
@@ -28,6 +62,7 @@ SHOP_WORDS = re.compile(r"\b(flipkart|amazon|meesho|myntra|ajio|nykaa|online|buy
                         r"deal|deals|discount|coupon|price|prices|cost|rate|india|in india|near me|app|website|"
                         r"order|delivery|cod|cash on delivery|best|top|latest|new|\d{4})\b", re.I)
 NOT_PRODUCT = re.compile(r"\b(movie|film|song|lyrics|meaning|trailer|series|episode|actor|actress|news|today|"
+                         r"release date|release|prime video|ott|netflix|hotstar|box office|cast|review in hindi|"
                          r"result|results|match|score|cricket|ipl|share|stock|ipo|login|sign in|customer care|"
                          r"care number|contact|refund|return policy|tracking|track order|job|jobs|career|salary|"
                          r"how to|what is|why|kaise|kya|recipe|wallpaper|photo|images|status|quotes|wishes|"
@@ -47,26 +82,28 @@ SKILL_WORDS = re.compile(r"\b(course|courses|class|classes|coaching|certificatio
                          r"fees|fee|for beginners|beginners|in hindi|hindi|in english|full|complete|best|top|india|"
                          r"\d{4}|udemy|coursera|youtube)\b", re.I)
 NOT_SKILL = re.compile(r"\b(result|results|admit card|answer key|cut ?off|exam date|syllabus pdf|login|recruitment|"
+                       r"release date|movie|song|news|stanford|harvard|iit|university|college|school|"
                        r"vacancy|vacancies|salary|job|jobs|notification|form|apply online|scholarship|news|"
                        r"meaning|movie|song|game)\b", re.I)
 APP_WORDS = re.compile(r"\b(app|apps|application|software|tool|tools|website|online|free|download|for pc|"
                        r"for android|for iphone|for windows|for mac|best|top|new|latest|india|\d{4}|alternative|"
                        r"alternatives|use|how)\b", re.I)
 NOT_APP = re.compile(r"\b(login|sign in|customer care|contact|helpline|not working|down|update|uninstall|delete "
-                     r"account|news|movie|song|lyrics|status|wallpaper|photo|meaning|government|sarkari|aadhaar|pan "
+                     r"account|jobs?|hiring|engineer|salary|careers?|stock|share price|lawsuit|hack|breach|"
+                     r"release date|movie|song|lyrics|status|wallpaper|photo|meaning|government|sarkari|aadhaar|pan "
                      r"card|ration|voter|epfo|upi|recharge|bill pay)\b", re.I)
 
 LANES = {
-    "products": {"seeds": None, "strip": SHOP_WORDS, "block": NOT_PRODUCT, "key": "q", "yt_suffix": None},
-    "skills":   {"seeds": ["course", "learn", "certification", "classes"], "strip": SKILL_WORDS,
-                 "block": NOT_SKILL, "key": "sk", "yt_suffix": "tutorial"},
-    "apps":     {"seeds": ["app", "ai tool", "software"], "strip": APP_WORDS,
-                 "block": NOT_APP, "key": "ap", "yt_suffix": "review"},
+    "products": {"seeds": PRODUCT_SEEDS, "strip": SHOP_WORDS, "block": NOT_PRODUCT, "key": "q", "yt_suffix": None},
+    "skills":   {"seeds": SKILL_SEEDS, "strip": SKILL_WORDS, "block": NOT_SKILL, "key": "sk", "yt_suffix": "tutorial"},
+    "apps":     {"seeds": APP_SEEDS, "strip": APP_WORDS, "block": NOT_APP, "key": "ap", "yt_suffix": "review"},
 }
 
 
-def lane_seeds(lane):
-    return LANES[lane]["seeds"] or BASE_SEEDS
+def lane_seeds(lane, today=None):
+    """Today's rotating slice of this lane's seed list (whole list when no date given)."""
+    pool = LANES[lane]["seeds"]
+    return rotate(pool, SEEDS_PER_DAY.get(lane, 5), today) if today else list(pool)
 
 
 def clean_phrase(q, lane="products"):
@@ -110,7 +147,9 @@ def active_seeds(seed_rows, today, base=BASE_SEEDS, lane="products"):
             continue
         if 0 <= age <= SNOWBALL_DAYS and r["seed"] not in base and r["seed"] not in live:
             live.append(r["seed"])
-    return list(base) + live[:MAX_SNOWBALL]
+    # up to 3 growing seeds go FIRST (the daily per-lane cap would otherwise cut them), then today's slice
+    grow = [s for s in live if s not in base][:3]
+    return grow + [b for b in base if b not in grow]
 
 
 def update_seeds(seed_rows, trend_rows, today):
@@ -132,7 +171,8 @@ def trends_rows(related, seed, today, lane="products"):
     """related: (query, value) pairs (pytrends 'rising') → cleaned phrases for this lane."""
     out = []
     for q, v in related:
-        if not is_product_phrase(q, lane):
+        comparison = lane == "apps" and re.search(r"\b(alternatives?|vs|versus|like)\b", str(q), re.I)
+        if not is_product_phrase(q, lane) or not (about_seed(q, seed) or comparison):
             continue
         rise = rise_value(v)
         if rise < MIN_RISE:
@@ -246,9 +286,12 @@ def youtube_rows(videos, head, today, now=None):
             a["videos"].append(v["id"])
             if p[2] and len(p[2]) > len(a["name"]):
                 a["name"] = p[2]
+            if not a.get("label"):
+                a["label"] = str(v.get("title", ""))[:70]
     out = []
     for (kind, pid), a in agg.items():
-        out.append({"date": today, "source": "youtube", "kind": kind, "product_id": pid, "name": a["name"],
+        name = a["name"] or (f"(unnamed — from video: {a.get('label', '')})" if a.get("label") else "")
+        out.append({"date": today, "source": "youtube", "kind": kind, "product_id": pid, "name": name,
                     "creators": len(a["channels"]), "views_per_day": round(a["vpd"]),
                     "videos": " ".join(f"https://youtu.be/{x}" for x in list(dict.fromkeys(a["videos"]))[:3])})
     return sorted(out, key=lambda r: (-r["creators"], -r["views_per_day"]))
@@ -288,14 +331,15 @@ def combine(trend_rows, yt_rows, amazon_titles_today, history_rows, today, yt_ph
                   "product_id": y["product_id"],
                   "trend_rise": 0, "trend_seed": "", "creators": y["creators"], "views_per_day": y["views_per_day"],
                   "videos": y["videos"]}
-    yt_named = [(r, _tokens(r["name"])) for r in out.values() if r["kind"] != "phrase" and r["name"]]
+    yt_named = [(r, _tokens(r["name"])) for r in out.values()
+                if r["kind"] != "phrase" and r["name"] and not str(r["name"]).startswith("(unnamed")]
     for r in out.values():
         src = set()
         if r["trend_rise"]:
             src.add("gtrends")
         if r["creators"] >= MIN_CREATORS and r["kind"] != "phrase":
             src.add("youtube")
-        toks = _tokens(r["name"])
+        toks = set() if str(r["name"]).startswith("(unnamed") else _tokens(r["name"])
         if r["kind"] == "phrase" and r["lane"] != "products" and r["creators"] >= MIN_CREATORS:
             src.add("youtube")                                  # recent tutorials/reviews from 3+ channels
         if r["kind"] == "phrase" and r["lane"] == "products" and len(toks) >= 1:

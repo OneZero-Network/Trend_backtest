@@ -162,6 +162,25 @@ sp2 = A.gh_supply(5, [{"full_name": "z/old", "stargazers_count": 300, "pushed_at
                        "description": "", "topics": [], "html_url": "u"}], now=now)
 check("repo quality note + last commit date", sp2["gh_top"][0]["note"].startswith("stale") and sp2["gh_top"][0]["updated"] == "2023-01-01")
 
+# ── v1.39 — only real tool requests are demand (from the 10 Nov live run)
+import trend_fetcher as tf
+asks = [("hn", "Show HN: Point your camera at a landscape to learn about its geology", False),
+        ("hn", "Ask HN: What in the world is taking Ubuntu so long?", False),
+        ("stackoverflow", "Try/except failing to catch exceptions", False),
+        ("stackoverflow", "Is there a library to convert JSON schema to TypeScript types?", True),
+        ("hn", "Ask HN: Is there a tool that tracks LLM API cost per user?", True),
+        ("hn", "Ask HN: Looking for an alternative to Zapier for self-hosting", True),
+        ("softwarerecs", "Offline PDF merger for Linux", True),
+        ("github_issue", "Feature request: export to CSV", True)]
+bad = [t for src, t, want in asks if A.is_tool_ask({"source": src, "text": t}) != want]
+check("launches, rants and debugging questions dropped; real tool requests kept", not bad, bad)
+check("readable need names", A.display_name({"items": [{"text": "Ask HN: Is there a tool that tracks LLM API cost per user?", "weight": 5}]})
+      == "tracks LLM API cost per user")
+long = "\n".join(f'line {i} <a href="https://example.com/{i}">[{i}]</a>' for i in range(400))
+parts = tf.split_message(long)
+check("long Telegram messages split at line breaks — no link cut in half",
+      len(parts) > 1 and all(p.count("<a ") == p.count("</a>") for p in parts) and all(len(p) <= 3900 for p in parts))
+
 # offline end-to-end run (all four sources simulated)
 import trend_fetcher as tf
 TMP = tempfile.mkdtemp(); tf.LOCAL_OUT_DIR = TMP; tf.TODAY = "2026-11-10"
@@ -179,9 +198,9 @@ op = pd.read_csv(os.path.join(TMP, "OPPORTUNITIES.csv"))
 check("OPPORTUNITIES: discovered needs for the week", set(op["week"]) == {"2026-11-09"} and len(op) == 2, op[["bucket", "sources"]])
 check("banned topics never reach the report (rummy)", not op["examples"].astype(str).str.contains("rummy").any())
 check("GitHub supply checked per need", calls and len(calls[0]) == 2)
-check("admin message v1.38: confidence, score parts, competition, links, focus warning, licence rule",
-      sent and "v1.38" in sent[0] and "confidence" in sent[0] and "score " in sent[0] and "competition:" in sent[0]
-      and "links:" in sent[0] and "no focus words set" in sent[0] and "do NOT reuse" in sent[0], sent[:1])
+check("admin message v1.39: real-request count, evidence verdict, focus warning, licence rule",
+      sent and "v1.39" in sent[0] and "Real tool requests this week" in sent[0]
+      and ("enough evidence" in sent[0]) and "no focus words set" in sent[0] and "do NOT reuse" in sent[0], sent[:1])
 check("WAITLIST tab created", os.path.exists(os.path.join(TMP, "WAITLIST.csv")))
 tf.main_automation()
 check("re-run in the same week replaces it (no duplicates)", len(pd.read_csv(os.path.join(TMP, "OPPORTUNITIES.csv"))) == len(op))

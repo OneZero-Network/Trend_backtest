@@ -239,11 +239,25 @@ def _tg_post(url, **kw):
     return r
 
 
+def split_message(text, limit=3900):
+    """Split at line breaks (never inside a tag or link); a single over-long line is cut on its own."""
+    chunks, cur = [], ""
+    for line in str(text).split("\n"):
+        while len(line) > limit:                     # pathological single line: cut it alone, tags stripped
+            chunks.append(re.sub(r"<[^>]+>", "", line[:limit])); line = line[limit:]
+        if len(cur) + len(line) + 1 > limit and cur:
+            chunks.append(cur); cur = ""
+        cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        chunks.append(cur)
+    return chunks or [""]
+
+
 def send_telegram(text):
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         log("Telegram not configured — skipping alert", "DBG")
         return
-    for chunk in [text[i:i+3900] for i in range(0, len(text), 3900)]:
+    for chunk in split_message(text):
         try:
             r = _tg_post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -1987,7 +2001,16 @@ def auto_stackoverflow(days=7):
         if not j.get("has_more"):
             break
     log(f"Automation: Stack Overflow {len(out)} unanswered questions this week")
-    return out
+    # Software Recommendations (same company, same API): a whole site of "I need a tool that does X" questions
+    since30 = int((datetime.now(timezone.utc) - timedelta(days=30)).timestamp())
+    p = {"order": "desc", "sort": "votes", "fromdate": since30, "pagesize": 100, "site": "softwarerecs"}
+    if STACKEXCHANGE_KEY:
+        p["key"] = STACKEXCHANGE_KEY
+    j = _get_json("https://api.stackexchange.com/2.3/questions", p)
+    recs = [{"source": "softwarerecs", "text": q.get("title", ""), "url": q.get("link", ""),
+             "weight": int(q.get("view_count", 0)) + 20 * int(q.get("score", 0))} for q in j.get("items", [])]
+    log(f"Automation: Software Recommendations {len(recs)} tool requests (30 days)")
+    return out + recs
 
 
 def auto_hn(days=30):
@@ -2115,7 +2138,9 @@ def main_automation():
     store = Store()
     week = (pd.Timestamp(TODAY) - timedelta(days=pd.Timestamp(TODAY).weekday())).strftime("%Y-%m-%d")
     items = auto_gh_issues() + auto_hn() + auto_stackoverflow() + auto_trends(TODAY)
-    items = [it for it in items if not discovery.BANNED.search(str(it.get("text", "")))]
+    raw_n = len(items)
+    items = [it for it in items if not discovery.BANNED.search(str(it.get("text", ""))) and automation.is_tool_ask(it)]
+    log(f"Automation: {len(items)} of {raw_n} items are real tool requests (launches and debugging questions dropped)")
     groups = automation.cluster_needs(items)
     # GitHub supply check only for the strongest groups (rate limits): more sources / requests first
     groups.sort(key=lambda g: (-len({it["source"] for it in g["items"]}), -len(g["items"]),
@@ -2131,6 +2156,9 @@ def main_automation():
     rows = automation.open_rows_v2(groups[:BR_AUTO_SUPPLY_CHECKS], supply, extra, week, hist, focus=BR_AUTO_FOCUS)
     web = auto_web(queries)
     rows = automation.finalize_v38(rows, {}, web, BR_AUTO_FOCUS_WORDS)
+    names = {" ".join(sorted(g["core"][:3])): automation.display_name(g) for g in groups[:BR_AUTO_SUPPLY_CHECKS]}
+    for r in rows:
+        r["name"] = names.get(r["bucket"]) or names.get(" ".join(sorted(r["problem"].split()[:3]))) or r["problem"]
     new = pd.DataFrame(rows).astype(str)
     keep = old[old["week"] != week] if not old.empty else old
     store.write("OPPORTUNITIES", pd.concat([keep, new], ignore_index=True) if not keep.empty else new)
@@ -2144,31 +2172,38 @@ def main_automation():
     by_src = {}
     for it in items:
         by_src[it["source"]] = by_src.get(it["source"], 0) + 1
-    L = [f"🛠 <b>What people want built</b> — week of {week} · v1.38 (admin only · for bizopstool)",
+    L = [f"🛠 <b>What people want built</b> — week of {week} · v1.39 (admin only · for bizopstool)",
          "Requests read: " + " · ".join(f"{k} {v}" for k, v in sorted(by_src.items())) + f" → {len(groups)} distinct needs"
          + (f" · focus words: {', '.join(BR_AUTO_FOCUS_WORDS)}" if BR_AUTO_FOCUS_WORDS else " · ⚠️ no focus words set (BR_AUTO_FOCUS_WORDS)")
          + ("" if BRAVE_API_KEY else " · web crowding: not checked (no BRAVE_API_KEY)")]
     infocus = [r for r in rows if r["fits_focus"]]
     parked = [r for r in rows if not r["fits_focus"]]
-    for r in infocus[:8]:
-        star = "⭐" if r["status"].startswith("SHORTLIST") else ("🔗" if "," in r["sources"] else "•")
+    strong = [r for r in infocus if r["confidence"] in ("Medium", "High")]
+    weak = [r for r in infocus if r["confidence"] == "Low"]
+    L.append(f"Real tool requests this week: {len(items)} of {raw_n} items · {len(strong)} needs with enough evidence")
+    if not strong:
+        L.append("\n<b>No need has enough evidence this week</b> (4+ asks from 2+ sources). Nothing to act on.")
+    for r in strong[:6]:
+        star = "⭐" if r["status"].startswith("SHORTLIST") else "🔗"
         comp = []
         if r["web_tool_pages"] >= 0: comp.append(f"{r['web_tool_pages']} tool sites on page 1" + (f" ({r['web_examples']})" if r["web_examples"] else ""))
         if r["commercial"]: comp.append(f"apps: {r['commercial']}")
         if r["show_hn_launches"]: comp.append(f"{r['show_hn_launches']} launched (Show HN)")
         if r["npm_packages"]: comp.append(f"{r['npm_packages']} npm pkgs")
         if r["gh_easy"]: comp.append(f"{r['gh_easy']} easy GitHub tools")
-        L.append(f"\n{star} <b>{_esc(r['problem'])}</b> [{r['audience']}] — {r['gap']} · confidence {r['confidence']} · effort {r['effort']}"
+        L.append(f"\n{star} <b>{_esc(r['name'])}</b> [{r['audience']}] — {r['gap']} · confidence {r['confidence']} · effort {r['effort']}"
                  + (" · 📊 data edge" if str(r["data_edge"]) == "True" else "") + (" · ⚠️ regulated" if r["regulated"] else ""))
         L.append(f"   score {r['score']} = {_esc(r['score_parts'])}")
         L.append(f"   competition: {_esc('; '.join(comp) or 'none found')}")
-        L.append(f"   asks: {_esc(r['examples'][:100])}")
         if r["links"]:
-            L.append("   links: " + " ".join(f'<a href="{_esc(u)}">[{n + 1}]</a>' for n, u in enumerate(str(r["links"]).split()[:3])))
+            L.append("   asks: " + " ".join(f'<a href="{_esc(u)}">[{n + 1}]</a>' for n, u in enumerate(str(r["links"]).split()[:3])))
         if r["reusable_code"]:
             L.append(f"   ♻️ {_esc(r['reusable_code'][:110])}")
+    if weak:
+        L.append("\n<i>Single signals (not evidence yet — watch only):</i> "
+                 + _esc(" · ".join(r["name"][:45] for r in weak[:6])))
     if parked:
-        L.append("\n🅿️ <b>Parked (off focus)</b>: " + _esc(", ".join(r["problem"] for r in parked[:8])))
+        L.append("\n🅿️ <b>Parked (off focus)</b>: " + _esc(" · ".join(r["name"][:40] for r in parked[:8])))
     L.append("\nBUILD = nothing exists · PACKAGE = exists, not easy · CROWDED · HARD = platform access · "
              "UNPROVEN = too little evidence (needs 4+ asks from 2+ sources) · ⭐ = 3 wk + 2 sources + Medium confidence + in focus")
     if verdicts:
@@ -2249,7 +2284,7 @@ def main():
             log(f"Backup schedule: today's data ({TODAY}) already fetched — skipping (avoids extra Amazon requests)")
             return
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.38 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.39 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -2386,7 +2421,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.38 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.39 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if "signals" in locals() and not signals.empty and "stock_gate" in signals:
         sg = signals["stock_gate"].astype(str)

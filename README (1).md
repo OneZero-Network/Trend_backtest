@@ -130,6 +130,15 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.39: only real tool requests count (from the first live run, 10 Nov)
+The first live v1.38 run read 430 items and reported 411 "needs", nearly all noise: 199 Stack Overflow debugging questions, "Show HN" launches counted as demand, and unreadable word-fragment names.
+- **Only tool requests count as demand:** "is there a tool / app / library…", "looking for…", "alternative to…", "how do I automate / bulk / batch…", "tool to convert / export / sync…". GitHub feature requests, Google Trends tool searches and Software Recommendations questions count as requests by nature.
+- **Launches are never demand:** "Show HN", "Launch HN", "I built…" are dropped (they're competition, already counted as supply).
+- **New source: Software Recommendations** (softwarerecs.stackexchange.com, same official API), a site made of "I need a tool that does X" questions from the last 30 days.
+- **Readable names:** each need shows its strongest request, cleaned ("tracks LLM API cost per user"), not word stems.
+- **The report leads with evidence:** "Real tool requests this week: N of M". Needs with Medium+ confidence are listed in full. If there are none, it says **"No need has enough evidence this week. Nothing to act on."** Single signals get one line.
+- **Telegram:** long messages now split at line breaks, so links are never cut in half. This applies to every message.
+
 ## v1.38: evidence, confidence, focus, web crowding, regulated flag
 - **Evidence and confidence:** each need shows its asks and sources, a confidence (Low < 4 asks or 1 source; Medium; High = 8+ asks from 3+ sources), and **how its score was made** (base, then ×0.7 regulated, ×0.4 web-crowded, ×0.6 low evidence). Low confidence can never be BUILD; it shows as **UNPROVEN**.
 - **⚠️ Regulated:** tax/GST/invoices, payroll, legal, medical, insurance, loans and KYC are flagged and scored down. A shortlisted regulated need says "check tax/legal rules & liability first".

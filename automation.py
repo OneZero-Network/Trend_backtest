@@ -278,7 +278,7 @@ def cluster_needs(items, min_overlap=0.5):
     return groups
 
 
-SOURCE_WEIGHT = {"github_issue": 3.0, "hn": 2.5, "stackoverflow": 1.0, "gtrends": 1.5}
+SOURCE_WEIGHT = {"github_issue": 3.0, "hn": 2.5, "softwarerecs": 2.5, "stackoverflow": 1.0, "gtrends": 1.5}
 
 
 def open_rows(groups, supply, week, history_rows=None, top_n=10, weeks_needed=3):
@@ -536,3 +536,40 @@ def finalize_v38(rows, groups_by_key, web, focus_words=None):
         if r["status"].startswith("SHORTLIST") and r["regulated"]:
             r["status"] += " · ⚠️ check tax/legal rules & liability first"
     return out
+
+
+
+# ══════════════════════════════════════════════════════════════════════
+# v1.39 — only REAL tool requests count as demand (10 Nov run: 199 debugging questions + "Show HN" launches)
+# ══════════════════════════════════════════════════════════════════════
+LAUNCH = re.compile(r"^\s*(show hn|launch hn|show reddit|introducing|announcing|we built|i built|i made)\b", re.I)
+TOOL_ASK = re.compile(
+    r"\b(is there (a|an|any)\s+(\w+\s+){0,3}(tool|app|apps|library|lib|package|extension|plugin|service|website|site|"
+    r"software|cli|api|way to (automatically|automate|bulk|batch|convert|export|sync|generate))|"
+    r"are there any\s+(\w+\s+){0,3}(tools|apps|libraries|extensions|services)|"
+    r"looking for (a|an)?\s*(\w+\s+){0,3}(tool|app|library|extension|service|software|alternative)|"
+    r"recommend(ation)?s? (a|an|for)?\s*(\w+\s+){0,3}(tool|app|library|extension|service|software)|"
+    r"alternatives? (to|for)|replacement for|wish there (was|were) (a|an)|"
+    r"how (do|can) (i|we|you) (automate|automatically|bulk|batch|programmatically)|"
+    r"(tool|app|script|extension|service) (to|that|which|for) (convert|automate|generate|export|import|sync|track|"
+    r"monitor|merge|split|extract|schedule|send|backup|compare|clean|format))\b", re.I)
+
+
+def is_tool_ask(item):
+    """Demand only: someone asking for a tool. GitHub feature requests count as asks for that feature.
+    Launches (Show HN…) are SUPPLY, never demand. Debugging questions without tool intent are dropped."""
+    t = str(item.get("text", ""))
+    if LAUNCH.search(t):
+        return False
+    if item.get("source") in ("github_issue", "gtrends", "softwarerecs"):
+        return True                                  # issue = feature ask; Trends seeds and Software Recs are tool-intent
+    return bool(TOOL_ASK.search(t))
+
+
+def display_name(group):
+    """Readable label: the most-weighted ask, cleaned of 'Ask HN:' / 'Is there a tool that…' wrappers."""
+    best = max(group["items"], key=lambda it: float(it.get("weight") or 0))
+    t = _LEAD.sub("", str(best["text"]))
+    t = re.sub(r"^\s*(is there (a|an|any)\s+(good\s+)?(tool|app|library|way|service|extension)\s+(that|to|for)\s+)", "", t, flags=re.I)
+    t = re.sub(r"\?+$", "", t).strip()
+    return (t[:70] + "…") if len(t) > 70 else t

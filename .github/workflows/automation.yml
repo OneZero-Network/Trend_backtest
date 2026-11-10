@@ -31,4 +31,7 @@ jobs:
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           GITHUB_TOKEN:       ${{ secrets.GITHUB_TOKEN }}      # provided by GitHub automatically — nothing to set up
           STACKEXCHANGE_KEY:  ${{ secrets.STACKEXCHANGE_KEY }}  # optional
+          BR_AUTO_FOCUS:      ${{ vars.BR_AUTO_FOCUS || 'all' }}   # all | business | developer
+          BR_AUTO_FOCUS_WORDS: ${{ vars.BR_AUTO_FOCUS_WORDS }}       # e.g. llm,token,openai,api cost
+          BRAVE_API_KEY:      ${{ secrets.BRAVE_API_KEY }}         # optional: web crowding check
         run: python trend_fetcher.py

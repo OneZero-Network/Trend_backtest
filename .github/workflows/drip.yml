@@ -34,6 +34,8 @@ jobs:
           AFFILIATE_TAG:       ${{ secrets.AFFILIATE_TAG }}
           AFFILIATE_CHAT_ID:   ${{ secrets.AFFILIATE_CHAT_ID }}
           AFFILIATE_BOT_TOKEN: ${{ secrets.AFFILIATE_BOT_TOKEN }}
+          FLIPKART_AFFID:      ${{ secrets.FLIPKART_AFFID }}     # Flipkart lane posts only when this is set AND the lead test passed
+          BR_FLIPKART_HOUR:    ${{ vars.BR_FLIPKART_HOUR || '19' }}
           AFFILIATE_GROUPS:    ${{ secrets.AFFILIATE_GROUPS }}
           BR_POOL_SIZE:        ${{ vars.BR_POOL_SIZE || '12' }}
         run: python trend_fetcher.py

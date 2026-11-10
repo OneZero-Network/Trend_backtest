@@ -35,7 +35,7 @@
 import os, re, sys, json, math, time, random, traceback, html as _html
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from discount_rule import discount_status            # shared with backtest — one rule
-import calculator, compliance, youtube_check, sourcing, picks, brief, discovery
+import calculator, compliance, youtube_check, sourcing, picks, brief, discovery, automation
 from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree as ET
 
@@ -1949,6 +1949,118 @@ def main_discover():
                       + "\n".join(f"{'✅' if ok else '⏳'} <b>{_esc(name)}</b>: {_esc(why)}" for name, ok, why in gates))
 
 
+# ══════════════════════════════════════════════════════════════════════
+# v1.35 AUTOMATION OPPORTUNITIES (weekly, admin only) — for bizopstool
+# ══════════════════════════════════════════════════════════════════════
+STACKEXCHANGE_KEY = os.environ.get("STACKEXCHANGE_KEY") or ""     # optional: raises the daily limit
+GITHUB_API_TOKEN  = os.environ.get("GITHUB_TOKEN") or ""          # GitHub Actions provides this automatically
+
+
+def auto_stackoverflow(days=7):
+    since = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+    qs, fails = [], 0
+    for tag in automation.SO_TAGS:
+        try:
+            p = {"order": "desc", "sort": "votes", "tagged": tag, "fromdate": since, "pagesize": 100,
+                 "site": "stackoverflow"}
+            if STACKEXCHANGE_KEY:
+                p["key"] = STACKEXCHANGE_KEY
+            r = requests.get("https://api.stackexchange.com/2.3/questions", params=p, timeout=30)
+            if r.status_code != 200:
+                fails += 1; log(f"  Stack Overflow [{tag}]: HTTP {r.status_code}", "WARN"); continue
+            j = r.json()
+            qs += j.get("items", [])
+            if j.get("backoff"):
+                time.sleep(int(j["backoff"]) + 1)
+            time.sleep(1)
+        except Exception as exc:
+            fails += 1; log(f"  Stack Overflow [{tag}]: {type(exc).__name__}", "WARN")
+    seen, out = set(), []
+    for q in qs:
+        if q.get("question_id") not in seen:
+            seen.add(q.get("question_id")); out.append(q)
+    log(f"Automation: Stack Overflow {len(out)} questions this week ({fails} tag requests failed)")
+    return out
+
+
+def auto_trends(today):
+    try:
+        from pytrends.request import TrendReq
+        pt = TrendReq(hl="en-IN", tz=330, timeout=(10, 25))
+    except Exception:
+        return []
+    out = []
+    for seed in automation.trend_seeds(today):
+        try:
+            pt.build_payload([seed], timeframe="today 1-m", geo="IN", cat=0)
+            rq = pt.related_queries().get(seed, {}).get("rising")
+            if rq is not None and not rq.empty:
+                out += [(q, discovery.rise_value(v)) for q, v in zip(rq["query"], rq["value"])
+                        if not discovery.BANNED.search(str(q))]
+            time.sleep(7 + random.uniform(0, 4))
+        except Exception as exc:
+            log(f"  Trends '{seed}': {type(exc).__name__}", "WARN"); time.sleep(20)
+    return out
+
+
+def auto_github(buckets):
+    hdr = {"Accept": "application/vnd.github+json", "User-Agent": "bazaar-radar"}
+    if GITHUB_API_TOKEN:
+        hdr["Authorization"] = f"Bearer {GITHUB_API_TOKEN}"
+    out = {}
+    for b in buckets:
+        gq = next(q for k, _, _, q in automation.BUCKETS if k == b)
+        try:
+            r = requests.get("https://api.github.com/search/repositories",
+                             params={"q": gq, "sort": "stars", "order": "desc", "per_page": 10}, headers=hdr, timeout=30)
+            if r.status_code != 200:
+                log(f"  GitHub [{b}]: HTTP {r.status_code}", "WARN"); continue
+            j = r.json()
+            out[b] = automation.gh_supply(j.get("total_count", 0), j.get("items", []))
+            time.sleep(2.5 if GITHUB_API_TOKEN else 7)       # search API: 30/min with token, 10/min without
+        except Exception as exc:
+            log(f"  GitHub [{b}]: {type(exc).__name__}", "WARN")
+    return out
+
+
+def main_automation():
+    log(f"🛠 BAZAAR RADAR — automation opportunities · {TODAY}")
+    store = Store()
+    week = (pd.Timestamp(TODAY) - timedelta(days=pd.Timestamp(TODAY).weekday())).strftime("%Y-%m-%d")
+    so = automation.so_demand(auto_stackoverflow())
+    gt = automation.trends_demand(auto_trends(TODAY))
+    supply = auto_github(sorted(set(so) | set(gt)))
+    old = store.read("OPPORTUNITIES")
+    hist = old[old["week"] != week].to_dict("records") if not old.empty else []
+    rows = automation.week_rows(so, gt, supply, week, hist)
+    new = pd.DataFrame(rows).astype(str)
+    keep = old[old["week"] != week] if not old.empty else old
+    store.write("OPPORTUNITIES", pd.concat([keep, new], ignore_index=True) if not keep.empty else new)
+    if store.read("WAITLIST").empty:
+        store.write("WAITLIST", pd.DataFrame([{"bucket": "(example — use a bucket key from OPPORTUNITIES)", "page_url": "",
+                                               "live_since": "", "signups": "", "sellers_asked": "", "sellers_yes": "",
+                                               "notes": "one row per waitlist page on bizopstool"}]))
+    wl = store.read("WAITLIST")
+    verdicts = automation.waitlist_verdict(wl.to_dict("records") if not wl.empty else [])
+    L = [f"🛠 <b>Automation opportunities</b> — week of {week} (admin only · for bizopstool)",
+         f"Stack Overflow questions grouped: {sum(v['so_questions'] for v in so.values())} · rising searches: "
+         f"{sum(v['gt_rising'] for v in gt.values())} · GitHub checked: {len(supply)} problems"]
+    for r in rows[:6]:
+        L.append(f"{'⭐' if r['status'].startswith('SHORTLIST') else '•'} <b>{_esc(r['problem'])}</b> — {r['gap']} · score {r['score']} · "
+                 f"{r['so_questions']} questions, {r['gt_rising']} rising searches · GitHub: {r['gh_maintained']} maintained"
+                 f" ({r['gh_easy']} easy to use) · top-5 for {r['weeks_in_top']} wk")
+        if r["reusable_code"]:
+            L.append(f"   ♻️ reusable (permissive licence): {_esc(r['reusable_code'][:120])}")
+    short = [r for r in rows if r["status"].startswith("SHORTLIST")]
+    L.append("\n⭐ = shortlisted (3+ weeks in top 5, 2 sources) → make a waitlist page on bizopstool, log it in WAITLIST."
+             if short else "\nNo shortlist yet — needs 3 weeks in the top 5 with both sources.")
+    if verdicts:
+        L.append("\n<b>Waitlist tests</b>")
+        L += [f"{'✅ BUILD' if ok else '⏳'} {_esc(line)}" for _, ok, line in verdicts]
+    L.append("Licences: MIT/Apache/BSD = reuse with credit · GPL = must open your code · none = do NOT reuse.")
+    send_telegram("\n".join(L))
+
+
 INPUT_TABS = {
     "COMMISSION": lambda: pd.DataFrame({"category_slug": list(CATEGORIES), "commission_pct": [""] * len(CATEGORIES),
                                         "note": ["type your rate from Associates Central → Commission Income Statement"] * len(CATEGORIES)}),
@@ -1997,6 +2109,8 @@ def main_estimate():
 
 
 def main():
+    if BR_MODE == "automation":
+        return main_automation()
     if BR_MODE == "discover":
         return main_discover()
     if BR_MODE == "drip":
@@ -2018,7 +2132,7 @@ def main():
             log(f"Backup schedule: today's data ({TODAY}) already fetched — skipping (avoids extra Amazon requests)")
             return
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.34 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.35 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -2155,7 +2269,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.34 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.35 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if "signals" in locals() and not signals.empty and "stock_gate" in signals:
         sg = signals["stock_gate"].astype(str)

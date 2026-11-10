@@ -130,6 +130,21 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.35: automation opportunities for bizopstool (weekly, admin only)
+New workflow **"Automation opportunities"** runs Mondays at 12:00 IST. It finds business problems people are trying to automate and checks whether a usable, legally reusable solution already exists.
+- **Demand:**
+  - Stack Overflow (official API): this week's questions tagged excel-vba, google-apps-script, google-sheets, excel, automation and vba, with views and unanswered counts.
+  - Google Trends: rising searches around 6 rotating automation seeds (excel macro, gst invoice, tally to excel, …).
+  - Both are grouped into **16 fixed business-problem groups** (GST invoices, WhatsApp messages via the official API, reconciliation, inventory alerts, Tally exports, seller operations…), so weeks are comparable.
+- **Supply (GitHub search):** for each group, how many projects exist; how many are **maintained** (updated in the last 12 months, 20+ stars); how many look **usable by non-programmers** (app, add-on, extension, no-code); and each top project's **licence**.
+- **Gap type:**
+  - **BUILD:** nothing maintained exists.
+  - **PACKAGE:** code exists but only developers can use it.
+  - **CROWDED:** several easy tools already exist.
+- **Shortlist:** in the top 5 for 3+ weeks, with both sources agreeing, and not CROWDED. Next step: an honest **waitlist page** on bizopstool, logged in the **WAITLIST** tab (signups, sellers_asked, sellers_yes). **Build only when** 30+ sign-ups or 3+ sellers say they'd pay.
+- **Licences:** MIT, Apache, BSD or ISC: reuse with credit. GPL: you must open your own code. No licence: **do not reuse**.
+- **No setup needed:** GitHub provides `GITHUB_TOKEN` automatically. `STACKEXCHANGE_KEY` is optional (it raises Stack Overflow's daily limit).
+
 ## v1.34: discovery fixes from the second run on 10 Nov
 - **Growing seeds are rechecked daily** against the current filters and festival window, so earlier noise ("jobs hunt stripe engineer", "namjooning stanford") can't come back as a seed.
 - **Skills need a learning word** (course, tutorial, learn, certification, roadmap, …): "python course" ✓, "burmese python…" ✗.

@@ -1956,30 +1956,81 @@ STACKEXCHANGE_KEY = os.environ.get("STACKEXCHANGE_KEY") or ""     # optional: ra
 GITHUB_API_TOKEN  = os.environ.get("GITHUB_TOKEN") or ""          # GitHub Actions provides this automatically
 
 
-def auto_stackoverflow(days=7):
-    since = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
-    qs, fails = [], 0
-    for tag in automation.SO_TAGS:
+def _get_json(url, params, headers=None, tries=2):
+    for k in range(tries):
         try:
-            p = {"order": "desc", "sort": "votes", "tagged": tag, "fromdate": since, "pagesize": 100,
-                 "site": "stackoverflow"}
-            if STACKEXCHANGE_KEY:
-                p["key"] = STACKEXCHANGE_KEY
-            r = requests.get("https://api.stackexchange.com/2.3/questions", params=p, timeout=30)
-            if r.status_code != 200:
-                fails += 1; log(f"  Stack Overflow [{tag}]: HTTP {r.status_code}", "WARN"); continue
-            j = r.json()
-            qs += j.get("items", [])
-            if j.get("backoff"):
-                time.sleep(int(j["backoff"]) + 1)
-            time.sleep(1)
+            r = requests.get(url, params=params, headers=headers or {"User-Agent": "bazaar-radar"}, timeout=30)
+            if r.status_code == 200:
+                return r.json()
+            log(f"  {url.split('/')[2]}: HTTP {r.status_code}", "WARN")
+            if r.status_code in (403, 429):
+                time.sleep(20 * (k + 1))
         except Exception as exc:
-            fails += 1; log(f"  Stack Overflow [{tag}]: {type(exc).__name__}", "WARN")
-    seen, out = set(), []
-    for q in qs:
-        if q.get("question_id") not in seen:
-            seen.add(q.get("question_id")); out.append(q)
-    log(f"Automation: Stack Overflow {len(out)} questions this week ({fails} tag requests failed)")
+            log(f"  {url.split('/')[2]}: {type(exc).__name__}", "WARN")
+    return {}
+
+
+def auto_stackoverflow(days=7):
+    """Most-viewed questions of the week with NO accepted answer, any topic (official API)."""
+    since = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+    out = []
+    for page in (1, 2):
+        p = {"order": "desc", "sort": "votes", "accepted": "False", "fromdate": since, "pagesize": 100,
+             "page": page, "site": "stackoverflow", "filter": "default"}
+        if STACKEXCHANGE_KEY:
+            p["key"] = STACKEXCHANGE_KEY
+        j = _get_json("https://api.stackexchange.com/2.3/search/advanced", p)
+        out += [{"source": "stackoverflow", "text": q.get("title", ""), "weight": q.get("view_count", 0),
+                 "url": q.get("link", "")} for q in j.get("items", [])]
+        if j.get("backoff"):
+            time.sleep(int(j["backoff"]) + 1)
+        if not j.get("has_more"):
+            break
+    log(f"Automation: Stack Overflow {len(out)} unanswered questions this week")
+    return out
+
+
+def auto_hn(days=30):
+    """Hacker News (official Algolia API): 'is there a tool…' asks of the last 30 days."""
+    since = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+    out, seen = [], set()
+    for q in automation.HN_QUERIES:
+        j = _get_json("https://hn.algolia.com/api/v1/search", {"query": q, "tags": "story",
+                       "numericFilters": f"created_at_i>{since}", "hitsPerPage": 50})
+        for h in j.get("hits", []):
+            if h.get("objectID") in seen:
+                continue
+            seen.add(h.get("objectID"))
+            w = int(h.get("points") or 0) + int(h.get("num_comments") or 0)
+            if w >= 3:
+                out.append({"source": "hn", "text": h.get("title", ""), "weight": w,
+                            "url": f"https://news.ycombinator.com/item?id={h.get('objectID')}"})
+        time.sleep(1)
+    log(f"Automation: Hacker News {len(out)} tool requests")
+    return out
+
+
+def auto_gh_issues(days=90):
+    """GitHub: open feature requests created in the last 90 days, most 👍 first (≥ MIN_ISSUE_REACTIONS)."""
+    hdr = {"Accept": "application/vnd.github+json", "User-Agent": "bazaar-radar"}
+    if GITHUB_API_TOKEN:
+        hdr["Authorization"] = f"Bearer {GITHUB_API_TOKEN}"
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    out, seen = [], set()
+    for lab in automation.ISSUE_LABELS:
+        j = _get_json("https://api.github.com/search/issues",
+                      {"q": f'is:issue is:open label:"{lab}" created:>{since} reactions:>={automation.MIN_ISSUE_REACTIONS}',
+                       "sort": "reactions-+1", "order": "desc", "per_page": 50}, headers=hdr)
+        for it in j.get("items", []):
+            if it.get("html_url") in seen:
+                continue
+            seen.add(it.get("html_url"))
+            repo = "/".join(str(it.get("repository_url", "")).split("/")[-2:])
+            out.append({"source": "github_issue", "text": it.get("title", ""), "url": it.get("html_url"),
+                        "weight": int((it.get("reactions") or {}).get("+1", 0)) + int(it.get("comments") or 0),
+                        "repo": repo})
+        time.sleep(2.5 if GITHUB_API_TOKEN else 7)
+    log(f"Automation: GitHub {len(out)} popular feature requests")
     return out
 
 
@@ -1990,72 +2041,138 @@ def auto_trends(today):
     except Exception:
         return []
     out = []
-    for seed in automation.trend_seeds(today):
+    for seed in automation.TREND_OPEN_SEEDS:
         try:
             pt.build_payload([seed], timeframe="today 1-m", geo="IN", cat=0)
             rq = pt.related_queries().get(seed, {}).get("rising")
             if rq is not None and not rq.empty:
-                out += [(q, discovery.rise_value(v)) for q, v in zip(rq["query"], rq["value"])
-                        if not discovery.BANNED.search(str(q))]
+                out += [{"source": "gtrends", "text": str(q), "weight": discovery.rise_value(v), "url": ""}
+                        for q, v in zip(rq["query"], rq["value"]) if not discovery.BANNED.search(str(q))]
             time.sleep(7 + random.uniform(0, 4))
         except Exception as exc:
             log(f"  Trends '{seed}': {type(exc).__name__}", "WARN"); time.sleep(20)
+    log(f"Automation: Google Trends {len(out)} rising tool searches")
     return out
 
 
-def auto_github(buckets):
+def auto_github(queries):
+    """Supply: for each need (its key words), what exists on GitHub. queries: {key: search words}."""
     hdr = {"Accept": "application/vnd.github+json", "User-Agent": "bazaar-radar"}
     if GITHUB_API_TOKEN:
         hdr["Authorization"] = f"Bearer {GITHUB_API_TOKEN}"
     out = {}
-    for b in buckets:
-        gq = next(q for k, _, _, q in automation.BUCKETS if k == b)
-        try:
-            r = requests.get("https://api.github.com/search/repositories",
-                             params={"q": gq, "sort": "stars", "order": "desc", "per_page": 10}, headers=hdr, timeout=30)
-            if r.status_code != 200:
-                log(f"  GitHub [{b}]: HTTP {r.status_code}", "WARN"); continue
-            j = r.json()
-            out[b] = automation.gh_supply(j.get("total_count", 0), j.get("items", []))
-            time.sleep(2.5 if GITHUB_API_TOKEN else 7)       # search API: 30/min with token, 10/min without
-        except Exception as exc:
-            log(f"  GitHub [{b}]: {type(exc).__name__}", "WARN")
+    for key, q in queries.items():
+        j = _get_json("https://api.github.com/search/repositories",
+                      {"q": q, "sort": "stars", "order": "desc", "per_page": 10}, headers=hdr)
+        if j:
+            out[key] = automation.gh_supply(j.get("total_count", 0), j.get("items", []))
+        time.sleep(2.5 if GITHUB_API_TOKEN else 7)        # search API: 30/min with token, 10/min without
+    return out
+
+
+BR_AUTO_SUPPLY_CHECKS = int(os.environ.get("BR_AUTO_SUPPLY_CHECKS") or 25)
+BR_AUTO_FOCUS = (os.environ.get("BR_AUTO_FOCUS") or "all").strip().lower()      # all | business | developer
+BR_AUTO_FOCUS_WORDS = [w.strip() for w in (os.environ.get("BR_AUTO_FOCUS_WORDS") or "").split(",") if w.strip()]
+BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY") or ""          # optional: web crowding check (Brave Search API)
+
+
+def auto_web(queries):
+    """Dedicated tool pages on the first results page, via Brave Search API (official; Google's Custom Search
+    API is closed to new customers and shuts down 1 Jan 2027). No key → skipped, shown as 'not checked'."""
+    if not BRAVE_API_KEY:
+        return {}
+    out = {}
+    for key, q in queries.items():
+        j = _get_json("https://api.search.brave.com/res/v1/web/search", {"q": f"{q} tool", "count": 10},
+                      headers={"Accept": "application/json", "X-Subscription-Token": BRAVE_API_KEY})
+        res = [{"url": x.get("url"), "title": x.get("title")} for x in (j.get("web") or {}).get("results", [])]
+        if j:
+            out[key] = automation.web_crowding(res)
+        time.sleep(1.1)
+    return out
+
+
+def auto_competition(queries, audiences):
+    """Competition GitHub can't see: launched products (Hacker News 'Show HN', last 2 years) for every need,
+    npm packages for developer needs. → {key: {'show_hn': n, 'npm': n}}"""
+    since = int((datetime.now(timezone.utc) - timedelta(days=730)).timestamp())
+    out = {}
+    for key, q in queries.items():
+        e = {}
+        j = _get_json("https://hn.algolia.com/api/v1/search", {"query": q, "tags": "show_hn",
+                       "numericFilters": f"created_at_i>{since},points>=10", "hitsPerPage": 1})
+        e["show_hn"] = int(j.get("nbHits", 0) or 0)
+        if audiences.get(key) == "Developer":
+            j = _get_json("https://registry.npmjs.org/-/v1/search", {"text": q, "size": 1})
+            e["npm"] = int(j.get("total", 0) or 0)
+        out[key] = e
+        time.sleep(0.5)
     return out
 
 
 def main_automation():
-    log(f"🛠 BAZAAR RADAR — automation opportunities · {TODAY}")
+    log(f"🛠 BAZAAR RADAR — open needs / automation opportunities · {TODAY}")
     store = Store()
     week = (pd.Timestamp(TODAY) - timedelta(days=pd.Timestamp(TODAY).weekday())).strftime("%Y-%m-%d")
-    so = automation.so_demand(auto_stackoverflow())
-    gt = automation.trends_demand(auto_trends(TODAY))
-    supply = auto_github(sorted(set(so) | set(gt)))
+    items = auto_gh_issues() + auto_hn() + auto_stackoverflow() + auto_trends(TODAY)
+    items = [it for it in items if not discovery.BANNED.search(str(it.get("text", "")))]
+    groups = automation.cluster_needs(items)
+    # GitHub supply check only for the strongest groups (rate limits): more sources / requests first
+    groups.sort(key=lambda g: (-len({it["source"] for it in g["items"]}), -len(g["items"]),
+                               -sum(float(it.get("weight") or 0) for it in g["items"])))
+    queries = {" ".join(sorted(g["core"][:3])): " ".join(g["core"][:3]) for g in groups[:BR_AUTO_SUPPLY_CHECKS]}
+    supply = auto_github(queries)
+    aud = {" ".join(sorted(g["core"][:3])): automation.judge(" ".join(str(it["text"]) for it in g["items"]),
+                                                             [b for it in g["items"] for b in automation.bucket_of(it["text"])])["audience"]
+           for g in groups[:BR_AUTO_SUPPLY_CHECKS]}
+    extra = auto_competition(queries, aud)
     old = store.read("OPPORTUNITIES")
     hist = old[old["week"] != week].to_dict("records") if not old.empty else []
-    rows = automation.week_rows(so, gt, supply, week, hist)
+    rows = automation.open_rows_v2(groups[:BR_AUTO_SUPPLY_CHECKS], supply, extra, week, hist, focus=BR_AUTO_FOCUS)
+    web = auto_web(queries)
+    rows = automation.finalize_v38(rows, {}, web, BR_AUTO_FOCUS_WORDS)
     new = pd.DataFrame(rows).astype(str)
     keep = old[old["week"] != week] if not old.empty else old
     store.write("OPPORTUNITIES", pd.concat([keep, new], ignore_index=True) if not keep.empty else new)
     if store.read("WAITLIST").empty:
-        store.write("WAITLIST", pd.DataFrame([{"bucket": "(example — use a bucket key from OPPORTUNITIES)", "page_url": "",
-                                               "live_since": "", "signups": "", "sellers_asked": "", "sellers_yes": "",
-                                               "notes": "one row per waitlist page on bizopstool"}]))
+        store.write("WAITLIST", pd.DataFrame([{"bucket": "(example — copy a 'bucket' value from OPPORTUNITIES)", "page_url": "",
+                                               "live_since": "", "shown": "", "positive": "", "signups": "",
+                                               "notes": "shown = people you showed it to directly (Telegram, seller groups, email); "
+                                                        "positive = said they'd use/pay or joined; signups = organic waitlist sign-ups"}]))
     wl = store.read("WAITLIST")
-    verdicts = automation.waitlist_verdict(wl.to_dict("records") if not wl.empty else [])
-    L = [f"🛠 <b>Automation opportunities</b> — week of {week} (admin only · for bizopstool)",
-         f"Stack Overflow questions grouped: {sum(v['so_questions'] for v in so.values())} · rising searches: "
-         f"{sum(v['gt_rising'] for v in gt.values())} · GitHub checked: {len(supply)} problems"]
-    for r in rows[:6]:
-        L.append(f"{'⭐' if r['status'].startswith('SHORTLIST') else '•'} <b>{_esc(r['problem'])}</b> — {r['gap']} · score {r['score']} · "
-                 f"{r['so_questions']} questions, {r['gt_rising']} rising searches · GitHub: {r['gh_maintained']} maintained"
-                 f" ({r['gh_easy']} easy to use) · top-5 for {r['weeks_in_top']} wk")
+    verdicts = automation.waitlist_verdict_v2(wl.to_dict("records") if not wl.empty else [])
+    by_src = {}
+    for it in items:
+        by_src[it["source"]] = by_src.get(it["source"], 0) + 1
+    L = [f"🛠 <b>What people want built</b> — week of {week} · v1.38 (admin only · for bizopstool)",
+         "Requests read: " + " · ".join(f"{k} {v}" for k, v in sorted(by_src.items())) + f" → {len(groups)} distinct needs"
+         + (f" · focus words: {', '.join(BR_AUTO_FOCUS_WORDS)}" if BR_AUTO_FOCUS_WORDS else " · ⚠️ no focus words set (BR_AUTO_FOCUS_WORDS)")
+         + ("" if BRAVE_API_KEY else " · web crowding: not checked (no BRAVE_API_KEY)")]
+    infocus = [r for r in rows if r["fits_focus"]]
+    parked = [r for r in rows if not r["fits_focus"]]
+    for r in infocus[:8]:
+        star = "⭐" if r["status"].startswith("SHORTLIST") else ("🔗" if "," in r["sources"] else "•")
+        comp = []
+        if r["web_tool_pages"] >= 0: comp.append(f"{r['web_tool_pages']} tool sites on page 1" + (f" ({r['web_examples']})" if r["web_examples"] else ""))
+        if r["commercial"]: comp.append(f"apps: {r['commercial']}")
+        if r["show_hn_launches"]: comp.append(f"{r['show_hn_launches']} launched (Show HN)")
+        if r["npm_packages"]: comp.append(f"{r['npm_packages']} npm pkgs")
+        if r["gh_easy"]: comp.append(f"{r['gh_easy']} easy GitHub tools")
+        L.append(f"\n{star} <b>{_esc(r['problem'])}</b> [{r['audience']}] — {r['gap']} · confidence {r['confidence']} · effort {r['effort']}"
+                 + (" · 📊 data edge" if str(r["data_edge"]) == "True" else "") + (" · ⚠️ regulated" if r["regulated"] else ""))
+        L.append(f"   score {r['score']} = {_esc(r['score_parts'])}")
+        L.append(f"   competition: {_esc('; '.join(comp) or 'none found')}")
+        L.append(f"   asks: {_esc(r['examples'][:100])}")
+        if r["links"]:
+            L.append("   links: " + " ".join(f'<a href="{_esc(u)}">[{n + 1}]</a>' for n, u in enumerate(str(r["links"]).split()[:3])))
         if r["reusable_code"]:
-            L.append(f"   ♻️ reusable (permissive licence): {_esc(r['reusable_code'][:120])}")
-    short = [r for r in rows if r["status"].startswith("SHORTLIST")]
-    L.append("\n⭐ = shortlisted (3+ weeks in top 5, 2 sources) → make a waitlist page on bizopstool, log it in WAITLIST."
-             if short else "\nNo shortlist yet — needs 3 weeks in the top 5 with both sources.")
+            L.append(f"   ♻️ {_esc(r['reusable_code'][:110])}")
+    if parked:
+        L.append("\n🅿️ <b>Parked (off focus)</b>: " + _esc(", ".join(r["problem"] for r in parked[:8])))
+    L.append("\nBUILD = nothing exists · PACKAGE = exists, not easy · CROWDED · HARD = platform access · "
+             "UNPROVEN = too little evidence (needs 4+ asks from 2+ sources) · ⭐ = 3 wk + 2 sources + Medium confidence + in focus")
     if verdicts:
-        L.append("\n<b>Waitlist tests</b>")
+        L.append("\n<b>Demand tests</b> (rate among people shown directly — not traffic)")
         L += [f"{'✅ BUILD' if ok else '⏳'} {_esc(line)}" for _, ok, line in verdicts]
     L.append("Licences: MIT/Apache/BSD = reuse with credit · GPL = must open your code · none = do NOT reuse.")
     send_telegram("\n".join(L))
@@ -2132,7 +2249,7 @@ def main():
             log(f"Backup schedule: today's data ({TODAY}) already fetched — skipping (avoids extra Amazon requests)")
             return
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.35 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.38 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -2269,7 +2386,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.35 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.38 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if "signals" in locals() and not signals.empty and "stock_gate" in signals:
         sg = signals["stock_gate"].astype(str)

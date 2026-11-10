@@ -129,9 +129,13 @@ def gh_supply(total_count, repos, now=None):
         maint += is_m
         easy += is_m and is_e
         if len(top) < 3:
-            top.append({"repo": r.get("full_name"), "stars": int(r.get("stargazers_count") or 0),
-                        "updated": str(r.get("pushed_at", ""))[:10], "licence": lic,
-                        "reusable": lic in PERMISSIVE, "url": r.get("html_url")})
+            stars = int(r.get("stargazers_count") or 0)
+            age = (now - pushed).days
+            note = ("hobby (<20★)" if stars < MAINTAINED_STARS else
+                    "stale (no commit for 1+ year)" if age > MAINTAINED_DAYS else
+                    "active" if age <= 90 else "maintained")
+            top.append({"repo": r.get("full_name"), "stars": stars, "updated": str(r.get("pushed_at", ""))[:10],
+                        "licence": lic, "reusable": lic in PERMISSIVE, "url": r.get("html_url"), "note": note})
     return {"gh_total": int(total_count or 0), "gh_maintained": maint, "gh_easy": easy, "gh_top": top}
 
 
@@ -195,5 +199,340 @@ def waitlist_verdict(rows, min_signups=30, min_yes=3):
         yes = int(float(str(r.get("sellers_yes") or 0) or 0))
         ok = su >= min_signups or yes >= min_yes
         out.append((b, ok, f"{LABEL.get(b, b)}: {su} waitlist sign-ups (need ≥{min_signups}) or "
-                           f"{yes} sellers said they'd pay (need ≥{min_yes})"))
+                           f"{yes} people said they'd pay (need ≥{min_yes})"))
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════
+# v1.36 OPEN DISCOVERY — any tool people (developers or not) are asking for
+# ══════════════════════════════════════════════════════════════════════
+# Needs are DISCOVERED each week (not a fixed list): each request is reduced to its key words, similar
+# requests from different sources are grouped, and the group is checked against GitHub.
+HN_QUERIES = ["is there a tool", "is there an app", "looking for a tool", "tool that", "app that"]
+TREND_OPEN_SEEDS = ["is there an app", "chrome extension for", "free tool to", "online converter", "app to automate"]
+ISSUE_LABELS = ["feature request", "enhancement", "feature"]
+MIN_ISSUE_REACTIONS = 10
+
+_LEAD = re.compile(r"^\s*(ask hn|tell hn|show hn|\[?feature( request)?\]?|feat|request|rfe|proposal|idea|suggestion)\s*[:\-–]\s*", re.I)
+_ASK = re.compile(r"\b(is there (a|an|any)|are there (any)?|looking for (a|an)?|need (a|an)|recommend(ation)?s? for|"
+                  r"how (do|can|would|should) (i|you|we)|what('s| is) the best|best way to|any (good )?|"
+                  r"tool (that|to|for)|app (that|to|for)|software (that|to|for)|way to|possible to|"
+                  r"please add|add support for|support for|ability to|option to|allow (to|users to)?|would be nice|"
+                  r"it would be (great|nice)|can (we|you|i))\b", re.I)
+_STOP = set("""a an the and or but if then else for to of in on at by with from as is are was were be been being it its
+this that these those there here what which who whom whose when where why how do does did can could should would
+will shall may might must i you we they he she me my our your their them us any some all each every no not only
+just also very more most such than too into onto over under again further once same so out up down about above
+below between both few other own off while during before after because until like get got using use used via
+without within per vs anyone someone something anything thing things way ways tool tools app apps software
+feature request support add allow option ability new good best simple easy free online please hn ask
+automatically automatic programmatically code script""".split())
+
+
+def need_tokens(text):
+    """'Ask HN: Is there a tool that converts Figma designs to Flutter?' → ['convert','figma','design','flutter']"""
+    t = _LEAD.sub("", str(text or "").lower())
+    t = _ASK.sub(" ", t)
+    toks = []
+    for w in re.findall(r"[a-z][a-z0-9+#.\-]{1,}", t):
+        w = w.strip(".-")
+        if w in _STOP or len(w) < 3 or w.isdigit():
+            continue
+        if w.endswith("ies") and len(w) > 5:
+            w = w[:-3] + "y"
+        elif w.endswith("s") and not w.endswith("ss") and len(w) > 4:
+            w = w[:-1]
+        for suf in ("ing", "ed"):
+            if w.endswith(suf) and len(w) > len(suf) + 3:
+                w = w[:-len(suf)]; break
+        if w not in toks:
+            toks.append(w)
+    return toks[:6]
+
+
+def cluster_needs(items, min_overlap=0.5):
+    """items: [{'source','text','weight','url'}] → groups of the same need across sources.
+    Two needs join if their key words overlap ≥ min_overlap (Jaccard) or share 3+ words."""
+    groups = []
+    for it in items:
+        toks = set(need_tokens(it["text"]))
+        if len(toks) < 2:
+            continue
+        best, best_j = None, 0.0
+        for g in groups:
+            inter = len(toks & g["tokens"])
+            j = inter / max(1, len(toks | g["tokens"]))
+            if (j >= min_overlap or inter >= 3) and j > best_j:
+                best, best_j = g, j
+        if best is None:
+            best = {"tokens": set(toks), "items": [], "core": None}
+            groups.append(best)
+        best["items"].append(it)
+        best["tokens"] |= toks
+    for g in groups:
+        cnt = {}
+        for it in g["items"]:
+            for w in need_tokens(it["text"]):
+                cnt[w] = cnt.get(w, 0) + 1
+        g["core"] = [w for w, _ in sorted(cnt.items(), key=lambda x: (-x[1], x[0]))][:4]
+    return groups
+
+
+SOURCE_WEIGHT = {"github_issue": 3.0, "hn": 2.5, "stackoverflow": 1.0, "gtrends": 1.5}
+
+
+def open_rows(groups, supply, week, history_rows=None, top_n=10, weeks_needed=3):
+    """→ OPPORTUNITIES rows (open needs), ranked, with weeks_in_top / status. supply: {need_key: gh_supply}."""
+    rows = []
+    for g in groups:
+        srcs = sorted({it["source"] for it in g["items"]})
+        d = sum(SOURCE_WEIGHT.get(it["source"], 1) * math.log10(1 + float(it.get("weight") or 0)) * 5 for it in g["items"])
+        d += 10 * (len(srcs) - 1)                                   # independent sources agreeing
+        key = " ".join(sorted(g["core"][:3]))
+        sp = supply.get(key, {"gh_total": 0, "gh_maintained": 0, "gh_easy": 0, "gh_top": []})
+        m, e = sp.get("gh_maintained", 0), sp.get("gh_easy", 0)
+        kind, factor = ("BUILD", 1.0) if m == 0 else ("PACKAGE", 0.8) if e <= 1 else ("CROWDED", 1 / (1 + e))
+        top = sp.get("gh_top", [])
+        ex = sorted(g["items"], key=lambda it: -float(it.get("weight") or 0))
+        rows.append({"week": week, "bucket": key, "problem": " ".join(g["core"]), "gap": kind,
+                     "score": round(min(100.0, d * factor), 1), "sources": ",".join(srcs), "requests": len(g["items"]),
+                     "smb_group": ",".join(sorted({b for it in g["items"] for b in bucket_of(it["text"])})),
+                     "gh_total": sp.get("gh_total", 0), "gh_maintained": m, "gh_easy": e,
+                     "reusable_code": " | ".join(f"{t['repo']} ({t['licence']}, ★{t['stars']})" for t in top if t["reusable"]),
+                     "do_not_reuse": " | ".join(f"{t['repo']} ({t['licence']})" for t in top if not t["reusable"]),
+                     "examples": " · ".join(str(it["text"])[:80] for it in ex[:3]),
+                     "links": " ".join(str(it.get("url", "")) for it in ex[:3] if it.get("url"))})
+    rows.sort(key=lambda r: -r["score"])
+    prev = {}
+    for r in history_rows or []:
+        if str(r.get("in_top", "")).lower() in ("true", "1"):
+            prev.setdefault(r["bucket"], set()).add(r["week"])
+    for i, r in enumerate(rows):
+        r["in_top"] = i < top_n
+        r["weeks_in_top"] = len(prev.get(r["bucket"], set()) | ({week} if r["in_top"] else set()))
+        r["status"] = ("SHORTLIST — test with a waitlist page" if r["weeks_in_top"] >= weeks_needed
+                       and len(r["sources"].split(",")) >= 2 and r["gap"] != "CROWDED" else "watch")
+    return rows
+
+
+# ══════════════════════════════════════════════════════════════════════
+# v1.37 STRONGER JUDGEMENT — competition beyond GitHub, buildability, effort, audience, data edge,
+# distribution-independent gate, streaks that survive re-wording
+# ══════════════════════════════════════════════════════════════════════
+MIN_REUSE_STARS = 20          # below this a repo is a practice project, not a base to build on
+
+# Known commercial tools per business problem group: GitHub can't see them, but buyers can.
+COMMERCIAL = {
+    "gst_invoice": ["Zoho Invoice", "Vyapar", "Khatabook", "Tally", "myBillBook", "ClearTax"],
+    "email_auto": ["Gmail mail merge (YAMM, GMass)", "Mailchimp"],
+    "whatsapp_msg": ["Interakt", "WATI", "AiSensy"],
+    "pdf_docs": ["Google Docs/Sheets add-ons", "Autocrat"],
+    "reports": ["Looker Studio", "Power BI", "Zoho Analytics"],
+    "data_merge": ["Power Query (Excel)", "Google Sheets IMPORTRANGE"],
+    "inventory": ["Zoho Inventory", "Vyapar", "Marg"],
+    "reconcile": ["Tally", "Zoho Books"],
+    "attendance_payroll": ["Zoho Payroll", "greytHR", "Keka"],
+    "reminders": ["Google Calendar", "Zapier"],
+    "forms": ["Google Forms", "Zapier"],
+    "tally_accounting": ["Tally", "Zoho Books"],
+    "ecommerce_ops": ["Shopify apps", "Unicommerce", "EasyEcom"],
+    "qr_barcode": ["many free generators"],
+    "backup_sync": ["Zapier", "Make"],
+}
+PLATFORM_HARD = re.compile(r"\b(whats ?app|instagram|insta|facebook|tiktok|linkedin|twitter|x\.com|youtube "
+                           r"(download|downloader)|netflix|spotify|bank|banking|upi|aadhaar|amazon (data|scrap|price)|"
+                           r"scrap\w*|bypass|captcha|ios|iphone|apple watch|airpods|tesla|car|printer driver)\b", re.I)
+EFFORT_L = re.compile(r"\b(ai|llm|gpt|model|machine learning|video|real.?time|sync\w*|collaborat\w*|mobile app|"
+                      r"android|ios|marketplace|erp|crm|payment|blockchain|game|3d|compiler)\b", re.I)
+EFFORT_S = re.compile(r"\b(convert\w*|formatter|format|generat\w*|calculat\w*|validat\w*|template|regex|json|csv|"
+                      r"markdown|pdf|qr|barcode|counter|timer|cheat ?sheet|checklist|extension|bookmarklet)\b", re.I)
+DEV_WORDS = re.compile(r"\b(api|sdk|cli|npm|pip|python|javascript|typescript|react|node|docker|kubernetes|git|github|"
+                       r"vscode|neovim|vim|terminal|json|yaml|regex|sql|database|postgres|mysql|compiler|library|"
+                       r"framework|plugin|webpack|vite|rust|golang|java|kotlin|swift|linux|bash|ci|deploy)\b", re.I)
+BIZ_WORDS = re.compile(r"\b(invoice|gst|billing|inventory|stock|seller|shop|store|customer|order|payroll|"
+                       r"attendance|accounting|tally|excel|sheet|sheets|report|whatsapp|crm|sales|lead|ecommerce|"
+                       r"amazon|flipkart|meesho|shopify|business|small business|msme)\b", re.I)
+DATA_EDGE = re.compile(r"\b(amazon|flipkart|meesho|seller|sellers|ecommerce|e-commerce|bestseller|product research|"
+                       r"trend|trending|price track\w*|price history|competitor|inventory|stock|sourcing|indiamart|"
+                       r"margin|seasonal|festival|marketplace)\b", re.I)
+
+
+def judge(text_all, smb_groups):
+    """→ dict(audience, effort, hard, data_edge, commercial) for one need, from its requests' words."""
+    t = str(text_all)
+    dev, biz = len(DEV_WORDS.findall(t)), len(BIZ_WORDS.findall(t)) + 2 * bool(smb_groups)
+    commercial = sorted({c for g in smb_groups for c in COMMERCIAL.get(g, [])})
+    return {"audience": "Business" if biz > dev else "Developer" if dev > biz else "General",
+            "effort": "L" if EFFORT_L.search(t) else "S" if EFFORT_S.search(t) else "M",
+            "hard": bool(PLATFORM_HARD.search(t)),
+            "data_edge": bool(DATA_EDGE.search(t)),
+            "commercial": commercial}
+
+
+def match_history(key_tokens, hist_keys, min_j=0.5):
+    """Carry a weekly streak when a need's wording shifts: best previous key with Jaccard ≥ min_j."""
+    best, bj = None, 0.0
+    for hk in hist_keys:
+        h = set(hk.split())
+        j = len(key_tokens & h) / max(1, len(key_tokens | h))
+        if j >= min_j and j > bj:
+            best, bj = hk, j
+    return best
+
+
+def open_rows_v2(groups, supply, extra, week, history_rows=None, top_n=10, weeks_needed=3, focus="all"):
+    """Like open_rows, plus: competition beyond GitHub (Show HN launches, npm packages, known commercial
+    tools), HARD (platform access), effort S/M/L, audience, data edge, reuse only ≥ MIN_REUSE_STARS,
+    and streaks matched across re-wordings. extra: {key: {'show_hn': n, 'npm': n}}."""
+    hist = history_rows or []
+    prev = {}
+    for r in hist:
+        if str(r.get("in_top", "")).lower() in ("true", "1"):
+            prev.setdefault(r["bucket"], set()).add(r["week"])
+    rows = []
+    for g in groups:
+        srcs = sorted({it["source"] for it in g["items"]})
+        key = " ".join(sorted(g["core"][:3]))
+        text_all = " ".join(str(it["text"]) for it in g["items"])
+        smb = sorted({b for it in g["items"] for b in bucket_of(it["text"])})
+        j = judge(text_all, smb)
+        if focus in ("business", "developer") and j["audience"].lower() not in (focus, "general"):
+            continue
+        sp = supply.get(key, {"gh_total": 0, "gh_maintained": 0, "gh_easy": 0, "gh_top": []})
+        ex_ = extra.get(key, {})
+        launches, npm = int(ex_.get("show_hn", 0)), int(ex_.get("npm", 0))
+        competitors = sp.get("gh_easy", 0) + min(launches, 5) + len(j["commercial"]) + (1 if npm >= 5 else 0)
+        d = sum(SOURCE_WEIGHT.get(it["source"], 1) * math.log10(1 + float(it.get("weight") or 0)) * 5 for it in g["items"])
+        d += 10 * (len(srcs) - 1) + (15 if j["data_edge"] else 0)
+        if j["hard"]:
+            kind, factor = "HARD", 0.3
+        elif sp.get("gh_maintained", 0) == 0 and competitors == 0:
+            kind, factor = "BUILD", 1.0
+        elif competitors <= 1:
+            kind, factor = "PACKAGE", 0.8
+        else:
+            kind, factor = "CROWDED", 1 / (1 + competitors)
+        factor *= {"S": 1.0, "M": 0.85, "L": 0.6}[j["effort"]]
+        top = [t for t in sp.get("gh_top", [])]
+        ex = sorted(g["items"], key=lambda it: -float(it.get("weight") or 0))
+        hk = key if key in prev else match_history(set(key.split()), prev.keys())
+        rows.append({"week": week, "bucket": hk or key, "problem": " ".join(g["core"]), "gap": kind,
+                     "score": round(min(100.0, d * factor), 1), "sources": ",".join(srcs), "requests": len(g["items"]),
+                     "audience": j["audience"], "effort": j["effort"], "data_edge": j["data_edge"],
+                     "smb_group": ",".join(smb), "commercial": ", ".join(j["commercial"]),
+                     "show_hn_launches": launches, "npm_packages": npm,
+                     "gh_total": sp.get("gh_total", 0), "gh_maintained": sp.get("gh_maintained", 0), "gh_easy": sp.get("gh_easy", 0),
+                     "reusable_code": " | ".join(f"{t['repo']} ({t['licence']}, ★{t['stars']}, last commit {t['updated']}, "
+                                                 f"{t.get('note', '')})" for t in top
+                                                 if t["reusable"] and t["stars"] >= MIN_REUSE_STARS),
+                     "do_not_reuse": " | ".join(f"{t['repo']} ({t['licence']})" for t in top if not t["reusable"]),
+                     "examples": " · ".join(str(it["text"])[:80] for it in ex[:3]),
+                     "links": " ".join(str(it.get("url", "")) for it in ex[:3] if it.get("url"))})
+    rows.sort(key=lambda r: -r["score"])
+    for i, r in enumerate(rows):
+        r["in_top"] = i < top_n
+        r["weeks_in_top"] = len(prev.get(r["bucket"], set()) | ({week} if r["in_top"] else set()))
+        r["status"] = ("SHORTLIST — show it to people directly, then a waitlist page"
+                       if r["weeks_in_top"] >= weeks_needed and len(r["sources"].split(",")) >= 2
+                       and r["gap"] in ("BUILD", "PACKAGE") else "watch")
+    return rows
+
+
+def waitlist_verdict_v2(rows, min_shown=20, min_rate=0.3, min_signups=30):
+    """Distribution-independent gate: of people you SHOWED it to directly (Telegram, seller groups, email),
+    what share said yes / joined? ≥ 30% of at least 20 → BUILD. 30+ organic sign-ups also passes."""
+    out = []
+    for r in rows:
+        b = str(r.get("bucket", "")).strip()
+        if not b or "example" in b.lower():
+            continue
+        n = lambda k: int(float(str(r.get(k) or 0).replace(",", "") or 0))
+        shown, pos, su = n("shown"), n("positive"), n("signups")
+        rate = pos / shown if shown else 0
+        ok = (shown >= min_shown and rate >= min_rate) or su >= min_signups
+        out.append((b, ok, f"{b}: shown to {shown} people, {pos} positive ({rate:.0%}; need ≥{min_rate:.0%} of ≥{min_shown})"
+                           f" · {su} organic sign-ups (or ≥{min_signups})"))
+    return out
+
+
+
+# ══════════════════════════════════════════════════════════════════════
+# v1.38 — evidence, confidence, regulated flag, focus fit, web crowding, repo quality, links
+# ══════════════════════════════════════════════════════════════════════
+REGULATED = re.compile(r"\b(gst|tax|taxes|tds|itr|income tax|e-?invoic\w*|invoice|invoices|payroll|salary|pf|esi|"
+                       r"accounting|audit|legal|contract|agreement|medical|health|doctor|insurance|loan|kyc|aadhaar|"
+                       r"pan card|stamp duty|compliance)\b", re.I)
+FORUM_HOSTS = re.compile(r"(reddit|stackoverflow|stackexchange|quora|youtube|github|medium|wikipedia|facebook|"
+                         r"linkedin|twitter|x\.com|news\.ycombinator|dev\.to)\.", re.I)
+TOOL_PAGE = re.compile(r"\b(tool|tools|generator|converter|online|free|app|calculator|template|software|maker|"
+                       r"extension|add-?on|plugin)\b", re.I)
+MIN_EVIDENCE = {"requests": 4, "sources": 2}          # below this nothing may be called BUILD
+
+
+def web_crowding(results):
+    """Brave web results (list of {'url','title'}) → dedicated tool pages on the first page (forums excluded)."""
+    pages = [r for r in results if not FORUM_HOSTS.search(str(r.get("url", "")))
+             and TOOL_PAGE.search(f"{r.get('title', '')} {r.get('url', '')}")]
+    hosts = []
+    for r in pages:
+        h = re.sub(r"^https?://(www\.)?", "", str(r.get("url", ""))).split("/")[0]
+        if h and h not in hosts:
+            hosts.append(h)
+    return {"web_tool_pages": len(hosts), "web_examples": ", ".join(hosts[:4])}
+
+
+def confidence(n_requests, n_sources):
+    if n_requests >= 8 and n_sources >= 3:
+        return "High"
+    if n_requests >= MIN_EVIDENCE["requests"] and n_sources >= MIN_EVIDENCE["sources"]:
+        return "Medium"
+    return "Low"
+
+
+def fits_focus(text, focus_words):
+    if not focus_words:
+        return True
+    t = str(text).lower()
+    return any(re.search(r"\b" + re.escape(w.lower()) + r"\b", t) for w in focus_words if w.strip())
+
+
+def finalize_v38(rows, groups_by_key, web, focus_words=None):
+    """Adds to open_rows_v2 output: web crowding, regulated flag, evidence + confidence (Low → UNPROVEN, never
+    BUILD), score parts, focus fit (off-focus → PARKED), repo quality, links. Re-ranks; shortlist only if
+    in focus, not regulated-unreviewed, Medium+ confidence."""
+    out = []
+    for r in rows:
+        w = web.get(r["bucket"]) or web.get(" ".join(sorted(r["problem"].split()[:3]))) or {}
+        r["web_tool_pages"] = int(w.get("web_tool_pages", -1)) if w else -1
+        r["web_examples"] = w.get("web_examples", "") if w else ""
+        text = f"{r['problem']} {r['examples']}"
+        r["regulated"] = bool(REGULATED.search(text))
+        r["confidence"] = confidence(int(r["requests"]), len(str(r["sources"]).split(",")))
+        r["fits_focus"] = fits_focus(text, focus_words or [])
+        base_gap = r["gap"]
+        if r["web_tool_pages"] >= 3 and base_gap in ("BUILD", "PACKAGE"):
+            r["gap"] = "CROWDED"
+        if r["gap"] == "BUILD" and r["confidence"] == "Low":
+            r["gap"] = "UNPROVEN"
+        factor = 1.0
+        if r["regulated"]:
+            factor *= 0.7
+        if r["gap"] == "CROWDED" and base_gap != "CROWDED":
+            factor *= 0.4
+        if r["confidence"] == "Low":
+            factor *= 0.6
+        r["score_parts"] = (f"base {r['score']} ({r['requests']} asks, {len(str(r['sources']).split(','))} sources"
+                            + (", +data edge" if str(r.get("data_edge")) == "True" else "") + f", effort {r['effort']})"
+                            + (" ×0.7 regulated" if r["regulated"] else "") + (" ×0.4 web-crowded" if r["gap"] == "CROWDED" and base_gap != "CROWDED" else "")
+                            + (" ×0.6 low evidence" if r["confidence"] == "Low" else ""))
+        r["score"] = round(float(r["score"]) * factor, 1)
+        out.append(r)
+    out.sort(key=lambda r: (not r["fits_focus"], -r["score"]))
+    for r in out:
+        if not r["fits_focus"]:
+            r["status"] = "PARKED (off focus)"
+        elif r["status"].startswith("SHORTLIST") and (r["confidence"] == "Low" or r["gap"] not in ("BUILD", "PACKAGE")):
+            r["status"] = "watch"
+        if r["status"].startswith("SHORTLIST") and r["regulated"]:
+            r["status"] += " · ⚠️ check tax/legal rules & liability first"
     return out

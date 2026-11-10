@@ -130,6 +130,36 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.38: evidence, confidence, focus, web crowding, regulated flag
+- **Evidence and confidence:** each need shows its asks and sources, a confidence (Low < 4 asks or 1 source; Medium; High = 8+ asks from 3+ sources), and **how its score was made** (base, then ×0.7 regulated, ×0.4 web-crowded, ×0.6 low evidence). Low confidence can never be BUILD; it shows as **UNPROVEN**.
+- **⚠️ Regulated:** tax/GST/invoices, payroll, legal, medical, insurance, loans and KYC are flagged and scored down. A shortlisted regulated need says "check tax/legal rules & liability first".
+- **Focus:** set `BR_AUTO_FOCUS_WORDS` (repository variable, comma-separated, e.g. `llm,token,openai,api cost`). Off-focus needs go to **🅿️ Parked** and are never shortlisted. The report warns when no focus words are set.
+- **Web crowding (optional):** with a `BRAVE_API_KEY` secret, the engine counts dedicated tool sites on the first results page (forums, GitHub and social sites excluded). 3+ makes a need CROWDED. It uses Brave Search API's official free monthly credit, because Google's Custom Search API is closed to new customers and shuts down 1 Jan 2027.
+- **Repos** show their last commit date and a quality note (hobby, stale, maintained or active). ClearTax was added to the GST apps.
+- **Links** to the example requests appear in the message, not just the sheet.
+
+## v1.37: stronger judgement in the automation report
+- **Competition beyond GitHub:** launched products (Hacker News "Show HN" posts with 10+ points, last 2 years), npm packages for developer needs, and a **known-apps list** for business problems (Zoho, Vyapar, Khatabook, Tally, WATI…). The 10 Nov run called GST invoices "BUILD" because GitHub had only ★3 projects; it's now CROWDED.
+- **HARD:** needs that depend on platform permission (WhatsApp, Instagram, banking/UPI, scraping, iOS…) are labelled HARD and scored down.
+- **Effort S/M/L:** converters, generators and templates are S; AI, video, sync, mobile and payments are L. Scores are lowered for bigger builds.
+- **Audience:** each need is Business, Developer or General, and the report is split by audience. `BR_AUTO_FOCUS` = all | business | developer.
+- **📊 Data edge:** needs your Bazaar Radar data can power (sellers, prices, trends, stock, sourcing, festivals) get a boost.
+- **Reuse only from 20+ star projects;** practice repos are never suggested.
+- **Streaks survive re-wording:** a need is matched to last week's similar need (≥50% shared words).
+- **Distribution-independent demand test (WAITLIST tab):** `shown` = people you showed it to directly, `positive` = said they'd use or pay. BUILD when ≥30% of at least 20 are positive, or 30+ organic sign-ups. The test measures demand, not your site's traffic.
+- The report header shows the version, so you can tell which code ran.
+
+## v1.36: open discovery: any tool people want built
+The weekly "Automation opportunities" run now **discovers needs** instead of using 16 fixed business groups (those stay as a 🏪 tag).
+- **Sources** (official APIs only, no scraping):
+  - **GitHub issues** labelled feature request / enhancement / feature, created in the last 90 days, with 10+ 👍, most-voted first.
+  - **Hacker News**: "is there a tool / app…" posts from the last 30 days (Algolia API).
+  - **Stack Overflow**: this week's most-viewed questions with no accepted answer, any topic.
+  - **Google Trends**: "is there an app", "chrome extension for", "free tool to", "online converter", "app to automate".
+- **How:** each request is reduced to its key words ("Ask HN: Is there a tool that converts Figma designs to Flutter?" → convert figma design flutter). Similar requests are grouped across sources (🔗 = 2+ sources). The top 25 groups (`BR_AUTO_SUPPLY_CHECKS`) are checked on GitHub: maintained, easy to use, licence. Each is labelled BUILD / PACKAGE / CROWDED.
+- **Shortlist ⭐:** top 10 for 3+ weeks, 2+ sources, not CROWDED. Then a waitlist page on bizopstool; build at 30+ sign-ups or 3+ people who'd pay.
+- Banned topics (betting, loans, trading/crypto, piracy, adult) are removed from every source.
+
 ## v1.35: automation opportunities for bizopstool (weekly, admin only)
 New workflow **"Automation opportunities"** runs Mondays at 12:00 IST. It finds business problems people are trying to automate and checks whether a usable, legally reusable solution already exists.
 - **Demand:**

@@ -35,7 +35,7 @@
 import os, re, sys, json, math, time, random, traceback, html as _html
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from discount_rule import discount_status            # shared with backtest — one rule
-import calculator, compliance, youtube_check, sourcing, picks, brief
+import calculator, compliance, youtube_check, sourcing, picks, brief, discovery
 from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree as ET
 
@@ -128,16 +128,18 @@ YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 BR_YT_TOP_N     = int(os.environ.get("BR_YT_TOP_N", "15"))       # ≈101 quota units each; free quota 10,000/day
 # State trends run in their own weekly workflow (BR_MODE=states), not in the daily run:
 # ~20 rate-limited Google calls would slow the daily run and risk blocking rising-queries.
-BR_MODE         = os.environ.get("BR_MODE") or "daily"          # daily | states | sourcing | affiliate | brief | estimate | drip
+BR_MODE         = os.environ.get("BR_MODE") or "daily"          # daily | states | sourcing | affiliate | brief | estimate | drip | discover
 BR_SOURCING_TOP_N   = int(os.environ.get("BR_SOURCING_TOP_N") or "20")     # products searched per run
 AFFILIATE_TAG     = os.environ.get("AFFILIATE_TAG") or ""         # your Amazon Associates tag, e.g. name-21
 AFFILIATE_GROUPS = os.environ.get("AFFILIATE_GROUPS") or ""
 # v1.27 drip posting: one pool per data day, posted in small batches through the day
 AFFILIATE_SHEET_ID = os.environ.get("AFFILIATE_SHEET_ID") or ""     # separate Google Sheet for affiliate tabs
 BR_POOL_SIZE       = int(os.environ.get("BR_POOL_SIZE") or 12)
+BR_STOCK_PREVIEW   = (os.environ.get("BR_STOCK_PREVIEW") or "1") != "0"   # admin-only early stock-gate look
 BR_POOL_PER_GROUP  = int(os.environ.get("BR_POOL_PER_GROUP") or 6)
 DRIP_SLOTS_IST     = [int(h) for h in (os.environ.get("BR_DRIP_HOURS") or "9,11,13,15,17,19,21").split(",") if h.strip()]
-NO_REPEAT_DAYS     = int(os.environ.get("BR_NO_REPEAT_DAYS") or 7)   # per-category public groups (overrides AFFILIATE_CHAT_ID)
+NO_REPEAT_DAYS     = int(os.environ.get("BR_NO_REPEAT_DAYS") or 7)
+DRIP_MIN_GAP_MIN   = int(os.environ.get("BR_DRIP_MIN_GAP_MIN") or 75)   # backup/duplicate runs inside this gap do nothing   # per-category public groups (overrides AFFILIATE_CHAT_ID)
 BR_AFF_TOP_N_GROUP = int(os.environ.get("BR_AFF_TOP_N_GROUP") or 4)
 AFFILIATE_CHAT_ID = os.environ.get("AFFILIATE_CHAT_ID") or ""     # PUBLIC channel; drafts go to your private chat if unset
 BR_AFF_TOP_N      = int(os.environ.get("BR_AFF_TOP_N") or "8")
@@ -1457,13 +1459,31 @@ def main_brief():
         trk = picks.update_tracking(trk, hist)
         line = picks.verdict(picks.scorecard(trk))
         weeks = trk["pick_date"].nunique()
-    page, text = brief.build(sig, heat, line, hist, last, picks, CATEGORIES, weeks)
+    disc = store.read("DISCOVERY")
+    early = []
+    if not disc.empty and "status" in disc:
+        d = disc[(disc["date"] == disc["date"].max()) & (disc["status"] == "2+ sources")
+                 & (disc.get("lane", pd.Series(["products"] * len(disc), index=disc.index)).fillna("products") == "products")
+                 & ~disc["sources"].astype(str).str.contains("amazon_list")]
+        early = [(r["name"] or r["product_id"], str(r["sources"]).replace(",", " + ")) for _, r in d.iterrows()]
+    ready = []
+    if not sig.empty and "stock_gate" in sig:
+        rr = sig[sig["stock_gate"].astype(str).str.contains("STOCK-READY")]
+        ready = [(r["title"], r["stock_gate"]) for _, r in rr.iterrows()]
+    # stock-ready list is YOUR edge — admin only, not in the brief sellers receive
+    page, text = brief.build(sig, heat, line, hist, last, picks, CATEGORIES, weeks, early=early, ready=None)
+    if ready:
+        send_telegram("🔒 <b>Stock-ready (admin only — not in the seller brief)</b>\n"
+                      + "\n".join(f"• {_esc(str(t)[:70])}" for t, _ in ready[:10]))
     os.makedirs(LOCAL_OUT_DIR, exist_ok=True)
     path = os.path.join(LOCAL_OUT_DIR, f"trend_brief_{last}.html")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(page)
-    send_telegram_document(path, "📰 Weekly brief (sample for sellers). Forward it to 20–30 sellers and "
-                                 "note who replies 'yes' and at what price — that is the demand test.")
+    send_telegram_document(path, "📰 Weekly brief (sample for sellers). Forward it to sellers yourself and log each one "
+                                 "in the SELLER_LEADS tab (date_sent, replied yes/no, price they'd pay). The B2B lane "
+                                 "is ready when ≥10 sent, ≥3 yes.")
+    if store.read("SELLER_LEADS").empty:
+        ensure_input_tabs(store)
     log(f"Brief written → {path}")
 
 
@@ -1674,6 +1694,14 @@ def main_drip():
             return
         pool = astore.read("AFF_POOL")
     pool = pool.astype(str)
+    plog = astore.read("AFF_POST_LOG")
+    if not plog.empty and "posted_at" in plog:
+        lastp = pd.to_datetime(plog["posted_at"], errors="coerce").max()
+        if pd.notna(lastp):
+            gap = (NOW_IST.replace(tzinfo=None) - lastp.to_pydatetime()).total_seconds() / 60
+            if 0 <= gap < DRIP_MIN_GAP_MIN:
+                log(f"Drip: last post {gap:.0f} min ago (< {DRIP_MIN_GAP_MIN}) — this slot was already served, skipping")
+                return
     hour = NOW_IST.hour
     left = slots_left(hour)
     logs, posted_total = [], 0
@@ -1712,11 +1740,202 @@ def main_drip():
         send_telegram("⚠️ AFFILIATE_TAG not set — drip links carry no Associates tag.")
 
 
+# ══════════════════════════════════════════════════════════════════════
+# v1.30 INDEPENDENT DISCOVERY — Google Trends (shopping intent) + YouTube (creator links)
+# ══════════════════════════════════════════════════════════════════════
+BR_DISC_TRENDS_CALLS = int(os.environ.get("BR_DISC_TRENDS_CALLS") or 20)      # split: products 10 · skills 5 · apps 5
+DISC_LANE_CALLS      = {"products": 0.5, "skills": 0.25, "apps": 0.25}
+BR_DISC_YT_PHRASES   = int(os.environ.get("BR_DISC_YT_PHRASES") or 4)          # per skills/apps lane, 100 API units each
+BR_B2B_MIN_PRICE     = int(os.environ.get("BR_B2B_MIN_PRICE") or 299)
+BR_DISC_MAX_LINKS    = int(os.environ.get("BR_DISC_MAX_LINKS") or 300)
+
+
+def disc_trends(seeds_by_lane, today):
+    """seeds_by_lane: {lane: [seeds]} → (rows, refusals). Products use Google's Shopping category;
+    skills and apps search all categories (courses/apps aren't 'Shopping')."""
+    try:
+        from pytrends.request import TrendReq
+        pt = TrendReq(hl="en-IN", tz=330, timeout=(10, 25))
+    except Exception as exc:
+        log(f"Discovery: pytrends unavailable ({type(exc).__name__}) — Trends skipped today", "WARN")
+        return [], 0
+    if isinstance(seeds_by_lane, list):
+        seeds_by_lane = {"products": seeds_by_lane}
+    plan = []
+    for lane, seeds in seeds_by_lane.items():
+        cap = max(2, int(BR_DISC_TRENDS_CALLS * DISC_LANE_CALLS.get(lane, 0.25)))
+        plan += [(lane, s) for s in seeds[:cap]]
+    rows, fails = [], 0
+    for lane, seed in plan:
+        try:
+            pt.build_payload([seed], timeframe="now 7-d", geo="IN", cat=18 if lane == "products" else 0)
+            rq = pt.related_queries().get(seed, {}).get("rising")
+            if rq is not None and not rq.empty:
+                rows += discovery.trends_rows(zip(rq["query"], rq["value"]), seed, today, lane=lane)
+            time.sleep(6 + random.uniform(0, 4))
+        except Exception as exc:
+            fails += 1
+            log(f"  Trends '{seed}': {type(exc).__name__}", "WARN")
+            if fails >= 3:
+                log("Discovery: Google Trends is refusing requests today — stopping Trends early", "WARN")
+                break
+            time.sleep(20)
+    return rows, fails
+
+
+def disc_youtube(today):
+    if not YOUTUBE_API_KEY:
+        log("Discovery: YOUTUBE_API_KEY not set — YouTube skipped", "WARN")
+        return [], 0
+    after = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ids = []
+    try:
+        for q in discovery.YT_QUERIES:
+            j = youtube_check._get(requests.Session(), "search", {
+                "key": YOUTUBE_API_KEY, "part": "snippet", "q": q, "type": "video", "regionCode": "IN",
+                "publishedAfter": after, "maxResults": 25, "order": "viewCount"})
+            ids += [it["id"]["videoId"] for it in j.get("items", []) if it["id"].get("videoId")]
+        ids = list(dict.fromkeys(ids))
+        videos = []
+        for i in range(0, len(ids), 50):
+            j = youtube_check._get(requests.Session(), "videos", {
+                "key": YOUTUBE_API_KEY, "part": "snippet,statistics", "id": ",".join(ids[i:i + 50])})
+            for it in j.get("items", []):
+                videos.append({"id": it["id"], "channel": it["snippet"]["channelId"], "title": it["snippet"]["title"],
+                               "description": it["snippet"].get("description", ""),
+                               "views": int(it.get("statistics", {}).get("viewCount", 0)),
+                               "published": it["snippet"]["publishedAt"]})
+    except Exception as exc:
+        log_tb("Discovery: YouTube", exc)
+        return [], 0
+    sess, budget = requests.Session(), [BR_DISC_MAX_LINKS]
+
+    def head(url):                                      # redirect ADDRESS only — the shop page is never loaded
+        if budget[0] <= 0:
+            return None
+        budget[0] -= 1
+        try:
+            r = sess.get(url, allow_redirects=False, timeout=10, headers={"User-Agent": "Mozilla/5.0"}, stream=True)
+            r.close()
+            time.sleep(0.2)
+            return r.headers.get("Location")
+        except Exception:
+            return None
+    rows = discovery.youtube_rows(videos, head, today)
+    log(f"Discovery: YouTube {len(videos)} videos → {len(rows)} linked products "
+        f"({sum(r['creators'] >= discovery.MIN_CREATORS for r in rows)} with {discovery.MIN_CREATORS}+ creators)")
+    return rows, len(videos)
+
+
+def disc_yt_phrases(trows, old_rows):
+    """Skills/apps second source: recent '<phrase> tutorial' / '<phrase> review' videos (last 30 days)
+    for the strongest few phrases per lane → {(lane, phrase): (channels, views/day)}."""
+    if not YOUTUBE_API_KEY:
+        return {}
+    seen_before = {(str(r.get("lane")), r.get("name")) for r in old_rows}
+    after = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    out = {}
+    for lane in ("skills", "apps"):
+        cands = sorted({(r["phrase"], r["rise"]) for r in trows if r.get("lane") == lane},
+                       key=lambda x: (-((lane, x[0]) in seen_before), -x[1]))[:BR_DISC_YT_PHRASES]
+        vids_by = {}
+        for ph, _ in cands:
+            try:
+                j = youtube_check._get(requests.Session(), "search", {
+                    "key": YOUTUBE_API_KEY, "part": "snippet", "q": f"{ph} {discovery.LANES[lane]['yt_suffix']}",
+                    "type": "video", "regionCode": "IN", "publishedAfter": after, "maxResults": 15, "order": "viewCount"})
+                ids = [it["id"]["videoId"] for it in j.get("items", []) if it["id"].get("videoId")]
+                if not ids:
+                    vids_by[ph] = []; continue
+                j = youtube_check._get(requests.Session(), "videos", {
+                    "key": YOUTUBE_API_KEY, "part": "snippet,statistics", "id": ",".join(ids)})
+                vids_by[ph] = [{"channel": it["snippet"]["channelId"], "published": it["snippet"]["publishedAt"],
+                                "views": int(it.get("statistics", {}).get("viewCount", 0))} for it in j.get("items", [])]
+            except Exception as exc:
+                log(f"  YouTube check '{ph}': {type(exc).__name__}", "WARN")
+        for ph, v in discovery.yt_phrase_check(vids_by).items():
+            out[(lane, ph)] = v
+    return out
+
+
+def main_discover():
+    log(f"🧭 BAZAAR RADAR — independent discovery · {TODAY}")
+    store = Store()
+    seed_tab = store.read("DISC_SEEDS")
+    seed_rows = seed_tab.to_dict("records") if not seed_tab.empty else []
+    seeds_by = {lane: discovery.active_seeds(seed_rows, TODAY, base=discovery.lane_seeds(lane), lane=lane)
+                for lane in discovery.LANES}
+    seeds = seeds_by["products"]
+    for lane, sd in seeds_by.items():
+        log(f"Discovery seeds [{lane}]: {', '.join(sd)}")
+    trows, tfails = disc_trends(seeds_by, TODAY)
+    yrows, nvid = disc_youtube(TODAY)
+    store.write("DISC_SEEDS", pd.DataFrame(discovery.update_seeds(seed_rows, trows, TODAY)).astype(str))
+    hist = store.read(SHEET_HISTORY)
+    bs = hist[hist["list"] == "bestsellers"] if not hist.empty else hist
+    last = bs["date"].max() if not bs.empty else None
+    titles_today = bs.loc[bs["date"] == last, "title"].dropna().astype(str).tolist() if last else []
+    old = store.read("DISCOVERY")
+    old_rows = old.to_dict("records") if not old.empty else []
+    prev = [r for r in old_rows if r.get("date") != TODAY]
+    ytp = disc_yt_phrases(trows, prev)
+    today_rows = discovery.combine(trows, yrows, titles_today, prev, TODAY, yt_phrase=ytp)
+    new = pd.DataFrame(today_rows).astype(str)
+    if not old.empty:
+        cutoff = (pd.Timestamp(TODAY) - timedelta(days=90)).strftime("%Y-%m-%d")
+        old = old[(old["date"] != TODAY) & (old["date"] >= cutoff)]
+    store.write("DISCOVERY", pd.concat([old, new], ignore_index=True) if not old.empty else new)
+    archive_today("discovery", new)
+    lt = discovery.lead_test(old_rows + today_rows,
+                             bs[["date", "asin", "title"]].fillna("").astype(str).to_dict("records") if not bs.empty else [])
+    prod = [r for r in today_rows if r.get("lane", "products") == "products"]
+    agree = [r for r in prod if r["status"] == "2+ sources"]
+    yt3 = [r for r in prod if r["kind"] != "phrase" and int(r["creators"]) >= discovery.MIN_CREATORS]
+    tr = [r for r in prod if r["kind"] == "phrase"]
+    L = [f"🧭 <b>Discovery</b> — {TODAY} (independent of Amazon's lists; not posted)",
+         f"Google Trends: {len(tr)} product searches rising from {min(len(seeds), BR_DISC_TRENDS_CALLS)} seeds"
+         + (f" · ⚠️ {tfails} refused" if tfails else ""),
+         f"YouTube: {nvid} shopping videos → {len(yt3)} products linked by {discovery.MIN_CREATORS}+ creators"]
+    if agree:
+        L.append("\n✅ <b>2+ sources agree</b>")
+        L += [f"• {_esc(r['name'][:60] or r['product_id'])} — {_esc(r['sources'])}" for r in agree[:8]]
+    if yt3:
+        L.append("\n🎥 <b>Most-linked by creators this week</b>")
+        L += [f"• {_esc(r['name'][:55] or r['product_id'])} — {r['creators']} channels" for r in yt3[:6]]
+    if tr:
+        L.append("\n🔎 <b>Rising shopping searches</b>")
+        L += [f"• {_esc(r['name'][:50])} (+{int(float(r['trend_rise'])):,}%, day {r['days_seen']})" for r in tr[:6]]
+    for lane, icon, label in (("skills", "🎓", "Skills & courses"), ("apps", "📱", "Apps & software")):
+        lr = [r for r in today_rows if r.get("lane") == lane]
+        if lr:
+            ok = [r for r in lr if r["status"] == "2+ sources"]
+            L.append(f"\n{icon} <b>{label}</b> — {len(lr)} rising, {len(ok)} confirmed by YouTube (admin only)")
+            L += [f"• {_esc(r['name'][:45])} (+{int(float(r['trend_rise'])):,}%"
+                  + (f", {r['creators']} channels" if int(r["creators"]) else "") + ")"
+                  for r in (ok + [x for x in lr if x not in ok])[:5]]
+    if lt["eligible"]:
+        L.append(f"\n🧪 <b>Lead test</b>: of {lt['eligible']} items found before Amazon ranked them, "
+                 f"{lt['appeared']} reached an Amazon bestseller list within 14 days"
+                 + (f" (median {lt['median_lead_days']} days later)" if lt["median_lead_days"] is not None else "") + ".")
+    else:
+        L.append("\n🧪 Lead test: first results after 14 days of discovery data.")
+    send_telegram("\n".join(L))
+    if NOW_IST.weekday() == 0 or os.environ.get("BR_READINESS") == "1":     # Mondays: release gates
+        leads = store.read("SELLER_LEADS")
+        gates = discovery.readiness(old_rows + today_rows, lt, leads.to_dict("records") if not leads.empty else [],
+                                    TODAY, BR_B2B_MIN_PRICE)
+        send_telegram("🚦 <b>Release readiness</b> (weekly — release a lane only when it shows ✅)\n"
+                      + "\n".join(f"{'✅' if ok else '⏳'} <b>{_esc(name)}</b>: {_esc(why)}" for name, ok, why in gates))
+
+
 INPUT_TABS = {
     "COMMISSION": lambda: pd.DataFrame({"category_slug": list(CATEGORIES), "commission_pct": [""] * len(CATEGORIES),
                                         "note": ["type your rate from Associates Central → Commission Income Statement"] * len(CATEGORIES)}),
     "SALES_ANCHORS": lambda: pd.DataFrame([{"date": "YYYY-MM-DD", "asin": "(example — replace)", "bought_past_month": "",
                                             "note": "open any Amazon product page from AMZ_BESTSELLERS, copy 'N+ bought in past month' (N only) with that day's date"}]),
+    "SELLER_LEADS": lambda: pd.DataFrame([{"seller": "(example — replace)", "contact": "", "channel": "WhatsApp/email/LinkedIn",
+                                           "date_sent": "", "replied": "", "price_inr_month": "", "most_useful_section": "",
+                                           "notes": "one row per seller you sent the brief to; replied = yes / no; price = what THEY said"}]),
     "AFF_ACTUALS": lambda: pd.DataFrame([{"week": "YYYY-MM-DD", "group": "", "clicks": "", "ordered_items": "", "earnings_inr": "",
                                           "note": "copy weekly from Associates Central reports"}]),
 }
@@ -1757,6 +1976,8 @@ def main_estimate():
 
 
 def main():
+    if BR_MODE == "discover":
+        return main_discover()
     if BR_MODE == "drip":
         return main_drip()
     if BR_MODE == "estimate":
@@ -1769,8 +1990,14 @@ def main():
         return main_brief()
     if BR_MODE == "states":
         return main_states()
+    if os.environ.get("GITHUB_EVENT_NAME") == "schedule":
+        # backup schedule: the Cloudflare Worker normally starts this run on time — don't fetch twice a day
+        h0 = Store().read(SHEET_HISTORY)
+        if not h0.empty and (h0["date"].astype(str) == TODAY).any():
+            log(f"Backup schedule: today's data ({TODAY}) already fetched — skipping (avoids extra Amazon requests)")
+            return
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.28 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.32 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -1907,7 +2134,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.28 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.32 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if "signals" in locals() and not signals.empty and "stock_gate" in signals:
         sg = signals["stock_gate"].astype(str)
@@ -1918,6 +2145,18 @@ def main():
             line += f" · {_esc(sg.iloc[0])}"
         for _, r in ready.head(5).iterrows():
             line += f"\n  • {_esc(str(r['title'])[:60])}"
+        if BR_STOCK_PREVIEW and sg.str.startswith("⏳").all():
+            import stock_gate as _sgm
+            pv, nd = _sgm.preview(hist, signals, TODAY)
+            held = set(signals.loc[signals.get("actionable", pd.Series(["True"] * len(signals), index=signals.index))
+                                   .astype(str).str.lower() == "false", "asin"].astype(str))
+            pready = [a for a, v in pv.items() if "STOCK-READY" in v and a not in held]   # quarantined items stay out
+            if pv:
+                tmap = dict(zip(signals["asin"].astype(str), signals["title"].astype(str)))
+                line += (f"\n  🔒 <b>Admin preview</b> ({nd} days, needs {_sgm.MIN_HISTORY} to be reliable — "
+                         f"not used for Decision): {len(pready)} would pass")
+                for a in pready[:5]:
+                    line += f"\n  • {_esc(tmap.get(a, a)[:60])}"
         lines.append(line)
     if BAD_CATEGORIES:
         lines.append(f"⚠️ <b>Ignored in BR_CATEGORIES:</b> {_esc(', '.join(BAD_CATEGORIES))} — these are search words, "

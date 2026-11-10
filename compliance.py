@@ -41,7 +41,7 @@ KEYWORD_RULES = [
      r"termite|bed ?bug|fly killer|repellent|rat (?:poison|kill))\b",
      "Insecticides Act — registration (CIB&RC) & licence to sell — check"),
     (r"\b(fire ?crackers?|green crackers?|fireworks?|sparklers?|phuljhari|anar|chakri|sky ?shots?|"
-     r"(?<!bath )bombs?|ladi|diwali line|pataka|patakha)\b",
+     r"(?<!bath )bombs?|(?:bomb|cracker|patakha|pataka) ladi|ladi (?:bomb|cracker|patakha)|diwali line|pataka|patakha)\b",
      "EXPLOSIVES (firecrackers) — PESO licence; Amazon restricts sale — DO NOT promote or stock"),
     (r"\b(cat food|dog food|pet food|kitten food|puppy food|pet treats?|dog treats?|cat treats?)\b",
      "Pet food — check applicable BIS / FSSAI / labelling rules"),
@@ -100,7 +100,7 @@ SEASONAL = [
     ("Chhath", r"\b(chhath|chhat puja|soop|supli|daura)\b"),
     ("Valentine's", r"\b(valentine)\b"),
     # decor that peaks for Diwali / Christmas / weddings even when the title names no festival
-    ("Festive decor", r"\b((string|fairy|curtain|pixel|rope|waterfall|serial|diwali)\s+lights?|toran|bandhanwar|"
+    ("Festive decor", r"\b((string|fairy|curtain|pixel|rope|waterfall|serial|diwali|ladi|jhalar)\s+lights?|toran|bandhanwar|"
                       r"jhalar|led\s+(string|curtain|pixel|rope)|decorative\s+lights?)\b"),
     ("Monsoon", r"\b(raincoat|umbrella)\b"),
     ("Summer", r"\b(air cooler|neck fan|ice pack)\b"),

@@ -43,7 +43,9 @@ def rising(signals, hist, today, n=5, picks_mod=None, cat_names=None):
     return out, seasonal
 
 
-def build(signals, heat, scorecard_line, hist, today, picks_mod, cat_names, weeks_tracked=0):
+def build(signals, heat, scorecard_line, hist, today, picks_mod, cat_names, weeks_tracked=0, early=None, ready=None):
+    """early: [(name, sources)] found by Google Trends/YouTube before Amazon ranked them (2+ sources).
+    ready: [(title, gate_note)] products that held their rank 2–3 weeks (stock gate passed)."""
     items, seasonal = rising(signals, hist, today, picks_mod=picks_mod, cat_names=cat_names)
     css = ("body{font-family:Arial,Helvetica,sans-serif;max-width:720px;margin:24px auto;padding:0 16px;color:#1d1d1f;"
            "line-height:1.45}h1{font-size:22px;margin-bottom:4px}h2{font-size:17px;margin-top:28px;border-bottom:1px solid #ddd;"
@@ -80,6 +82,18 @@ def build(signals, heat, scorecard_line, hist, today, picks_mod, cat_names, week
             parts.append(f"<tr><td>{H(c['category'])}</td><td>{_num(c['top10_score']) or 0:.0f}</td>"
                          f"<td>{H(c.get('movers', ''))}</td></tr>")
         parts.append("</table>")
+    if ready:
+        parts.append("<h2>Held up for 2–3 weeks</h2><p class='muted'>In their category's top 100 on most of the last 21 days, "
+                     "rank not falling, in a category where products usually stay for months — the ones worth getting "
+                     "supplier quotes for.</p><ul>")
+        parts += [f"<li>{H(str(t)[:100])}</li>" for t, _ in ready[:6]]
+        parts.append("</ul>")
+    if early:
+        parts.append("<h2>Early signals</h2><p class='muted'>Rising in Google searches and/or linked by several YouTube "
+                     "creators this week, but <b>not yet</b> on Amazon's bestseller lists. Unproven — interest, not sales. "
+                     "We track how many reach Amazon's lists within 14 days.</p><ul>")
+        parts += [f"<li>{H(str(n)[:80])} <span class='muted'>({H(src)})</span></li>" for n, src in early[:6]]
+        parts.append("</ul>")
     if not seasonal.empty:
         parts.append("<h2>Seasonal watch</h2><p class='muted'>Climbing on a date-bound occasion — great for "
                      "short-term listing/ads, risky for bulk stock that arrives after the event.</p><ul>")

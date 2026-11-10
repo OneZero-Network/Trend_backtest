@@ -41,6 +41,7 @@ def run_at(day, hour):
     tf.main_drip()
 
 per_slot = []
+tf.DRIP_MIN_GAP_MIN = 75
 for h in tf.DRIP_SLOTS_IST:
     before = len([1 for c, *_ in sent if c == "@onezerodeals"])
     n_log = len(pd.read_csv(os.path.join(TMP, "AFF_POST_LOG.csv"))) if os.path.exists(os.path.join(TMP, "AFF_POST_LOG.csv")) else 0
@@ -62,6 +63,10 @@ check("no product posted twice in a day", log_df["asin"].is_unique)
 check("best picks first (morning gets the top scores)", log_df["asin"].iloc[0] == "K00000001", log_df["asin"].iloc[0])
 pk = pd.read_csv(os.path.join(TMP, "PICKS.csv"))
 check("forward test recorded once for the day (12 picks + baselines)", (pk["role"] == "pick").sum() == 12, (pk["role"] == "pick").sum())
+n0 = len(pd.read_csv(os.path.join(TMP, "AFF_POST_LOG.csv")))
+tf.NOW_IST = datetime(2026, 11, 11, 21, 50, tzinfo=IST); tf.main_drip()
+check("v1.29: a second (backup) run 15 min after a post does nothing",
+      len(pd.read_csv(os.path.join(TMP, "AFF_POST_LOG.csv"))) == n0)
 run_at("2026-11-11", 21)
 check("extra run after the pool is done posts nothing", len([1 for c, *_ in sent if c == "@onezerodeals"]) == 7)
 

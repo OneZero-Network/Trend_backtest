@@ -1,0 +1,12 @@
+name = "bazaar-radar-scheduler"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+
+[vars]
+GH_OWNER = "OneZero-Network"
+GH_REPO  = "Trend_backtest"
+GH_REF   = "main"          # change if your default branch is "master"
+
+[triggers]
+# UTC. Must match JOBS in worker.js exactly.
+crons = ["15 2 * * *", "30 3-15/2 * * *"]

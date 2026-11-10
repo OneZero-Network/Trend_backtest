@@ -23,6 +23,12 @@ check("winter wraps year end", season.window("SEASONAL: Winter", "2027-01-10")["
 
 # firecrackers
 check("firecracker flagged", "EXPLOSIVES" in compliance.compliance_flags("Green crackers sparkler box", "kitchen"))
+check("'ladi light' (light string) is NOT explosives, but is festive decor",
+      "EXPLOSIVES" not in compliance.compliance_flags("Crompton Galaxy Pixel Ladi Light 3W, 10m", "kitchen")
+      and "Festive decor" in compliance.seasonal_flag("Crompton Galaxy Pixel Ladi Light 3W, 10m"))
+check("'bomb ladi' / 'cracker ladi' still explosives",
+      "EXPLOSIVES" in compliance.compliance_flags("1000 wala bomb ladi", "sports")
+      and "EXPLOSIVES" in compliance.compliance_flags("Cracker ladi 500", "sports"))
 check("bath bomb not flagged", "EXPLOSIVES" not in compliance.compliance_flags("Lavender bath bombs", "beauty"))
 
 # picks filters
@@ -137,5 +143,13 @@ sigp = pd.DataFrame([
 rj = []
 pk = picks.select_picks(sigp, n=8, today="2026-11-09", rejected=rj)
 check("no price today → not picked, reason shown", list(pk["asin"]) == ["IN"] and any("out of stock" in w for _, w in rj), (list(pk["asin"]), rj))
+
+# v1.32: admin-only stock preview
+pvh = Hh[Hh["date"].isin(D30[:10])]
+pv, nd = SG.preview(pvh, sig.head(1), D30[9])
+check("preview: with 10 days, a steady product passes the scaled rules (admin only)",
+      nd == 10 and pv.get("STEADY", "").startswith("✅"), (nd, pv))
+check("preview never replaces the real gate (still NEED DATA)", SG.gate_all(pvh, sig.head(1), D30[9])["STEADY"].startswith("⏳"))
+check("no preview once the real gate has enough history", SG.preview(Hh, sig.head(1), D30[-1])[0] == {})
 
 print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED"); sys.exit(1 if FAILS else 0)

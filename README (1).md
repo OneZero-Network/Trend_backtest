@@ -130,6 +130,39 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.32: stock analysis is admin-only, with an early preview
+- **The seller brief no longer includes the stock-ready list.** That's your edge. It goes to the admin chat only ("🔒 Stock-ready, admin only").
+- **Admin preview:** while there are fewer than 21 days of history, the digest's 📦 Stock gate line adds "🔒 Admin preview", which applies the same tests scaled to the days available (in the top 100 on at least ⅔ of them). It's less reliable and **never changes the calculator's Decision**, which keeps the real 21-day gate. Turn it off with `BR_STOCK_PREVIEW=0`.
+- **Fixes:** "ladi light" (a string of lights) is festive decor, not explosives. Only "bomb/cracker ladi" counts as a firecracker.
+
+## v1.31: three admin-only lanes and release gates
+Nothing below is posted publicly. Each lane is released only when its gate shows ✅ in the **🚦 Release readiness** message, sent every Monday after discovery (force it with `BR_READINESS=1`).
+
+| Lane | Sources (2 must agree) | Gate |
+|---|---|---|
+| Product discovery (future Flipkart lane) | Google Trends (Shopping) + YouTube creator links + Amazon lists | Lead test: ≥30 items judged, ≥30% reach an Amazon list within 14 days |
+| **Skills & courses** | Google Trends ("course", "learn", "certification", "classes" + growing seeds) + YouTube: "<skill> tutorial" videos from the last 30 days with ≥100 views/day on 3+ channels | ≥20 items with 2 sources, and ≥50% rising again 10+ days after first found |
+| **Apps & software** | Google Trends ("app", "ai tool", "software" + growing seeds) + YouTube: "<app> review" videos, same rule | Same as skills |
+| **Seller data (B2B)** | The weekly brief, now with **Early signals** and **Held up for 2–3 weeks** sections | SELLER_LEADS tab: ≥10 sent, ≥3 "yes", median price ≥ ₹299/month (`BR_B2B_MIN_PRICE`) |
+
+- **Blocked in every lane:** betting and real-money games (banned in India, 2025), loan and instant-cash apps, trading, stock tips and crypto, pirated or modded software, adult content. Also blocked: exam results, jobs and government services in skills, and login or customer-care searches in apps.
+- **Budget:** Google Trends makes 20 lookups a day (products 10, skills 5, apps 5). YouTube uses about 1,500 extra units a day (6 product searches plus 4 checks each for skills and apps), well within the free 10,000.
+- **SELLER_LEADS:** one row per seller you send the brief to: `date_sent`, `replied` (yes/no), `price_inr_month` (the price **they** said).
+
+## v1.30: independent discovery (not dependent on Amazon's lists)
+New workflow **"Independent discovery"** runs daily at 11:00 IST. It writes to the DISCOVERY tab and the admin chat; **nothing is posted publicly**.
+- **Google Trends:** rising searches around shopping intent, using 6 base seeds ("flipkart", "amazon", "meesho", "under 500", "under 1000", "gift for") plus up to 8 **growing seeds**. A strong (≥1000%) multi-word product search becomes a seed for 7 days (DISC_SEEDS tab). Non-product searches (news, sales dates, customer care, "how to") are removed, and shop and budget words are stripped ("air fryer flipkart under 3000" → "air fryer"). Capped at 14 lookups a day; it stops early if Google refuses.
+- **YouTube:** 6 searches ("amazon finds india", "flipkart haul", "meesho haul", …) for Indian videos from the last 7 days, sorted by views. Product links in video descriptions (amzn.to, fkrt.it, …) are followed **only to the redirect address**, never loading the shop page, to get the exact Amazon or Flipkart product ID and name. Products are counted by **different channels**; 3+ creators is a signal. Uses about 700 of the free 10,000 daily API units.
+- **Agreement:** each item lists its independent sources (gtrends, youtube, amazon_list). It's marked **"2+ sources"** only when two agree, and a Trends-only search must also appear on 2+ days.
+- **Lead test:** for items found while *not* on Amazon's lists, the summary reports how many reached an Amazon bestseller list within 14 days, and the median lead in days. This shows whether these sources give early warning.
+- Settings: `BR_DISC_TRENDS_CALLS` (14), `BR_DISC_MAX_LINKS` (300 short-link lookups a day).
+
+## v1.29: on-time scheduling with a Cloudflare Worker
+GitHub's `schedule:` often starts runs 15–60 minutes late. `cloudflare_worker/` holds a free Worker that fires on Cloudflare's punctual cron and starts the daily fetch (07:45 IST) and the drip posts (9 am–9 pm IST, every 2 hours) through GitHub's API. Those runs usually begin within about a minute.
+- GitHub's schedules stay as a **backup**. A backup daily run exits if today's data is already in, so Amazon isn't fetched twice. A drip run within 75 minutes of the last post does nothing (`BR_DRIP_MIN_GAP_MIN`).
+- If GitHub refuses a start request (for example, an expired token), the Worker alerts the admin chat.
+- Setup is in `cloudflare_worker/SETUP.md`.
+
 ## v1.28: WhatsApp post of the day
 When the morning pool is built, the admin chat gets **one** ready-made WhatsApp post with the top 5 picks and a tap-to-share link (choose your channel, send). The plain text follows it so you can copy it on a computer. WhatsApp can't make words clickable, so every product shows its full tagged link on its own line; copying the Telegram post into WhatsApp loses the links.
 

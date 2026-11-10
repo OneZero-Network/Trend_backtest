@@ -48,15 +48,19 @@ def _band(rank):
     return "1-20" if rank <= 20 else "21-50" if rank <= 50 else "51-100"
 
 
-def gate_all(hist, signals, today):
-    """→ {asin: verdict string} for every ASIN in signals."""
+def gate_all(hist, signals, today, min_history=None, lookback=None, min_days_in=None):
+    """→ {asin: verdict string} for every ASIN in signals. The optional overrides are for the
+    ADMIN-ONLY preview (fewer days); the calculator's Decision always uses the real thresholds."""
+    MIN_HISTORY_ = min_history or MIN_HISTORY
+    LOOKBACK_ = lookback or LOOKBACK
+    MIN_DAYS_IN_ = min_days_in or MIN_DAYS_IN
     if hist is None or hist.empty or signals is None or signals.empty:
         return {}
     bs = _bs(hist)
     days_all = sorted(bs["date"].unique())
     n_hist = len(days_all)
     ret = retention_by_band(bs) if n_hist >= 2 else {}
-    recent = days_all[-LOOKBACK:]
+    recent = days_all[-LOOKBACK_:]
     best = bs.groupby(["asin", "date"]).agg(rank=("rank", "min"), cat=("category_slug", "first")).reset_index()
     first_seen = best.groupby("asin")["date"].min().to_dict()
     days_in = best[best["date"].isin(recent)].groupby("asin")["date"].nunique().to_dict()
@@ -71,15 +75,15 @@ def gate_all(hist, signals, today):
         w = season.window(seas, today)
         if w["event"] and not w["stock_ok"]:
             out[a] = f"❌ NO — season: {w['note']}"; continue
-        if n_hist < MIN_HISTORY:
-            out[a] = f"⏳ NEED DATA — {n_hist}/{MIN_HISTORY} days of history"; continue
+        if n_hist < MIN_HISTORY_:
+            out[a] = f"⏳ NEED DATA — {n_hist}/{MIN_HISTORY_} days of history"; continue
         din = days_in.get(a, 0)
         age = (pd.Timestamp(today) - pd.Timestamp(first_seen.get(a, today))).days
         if a not in series:
             out[a] = "❌ NO — not on the bestseller list"; continue
-        if din < MIN_DAYS_IN or age < MIN_DAYS_IN:
-            need = max(MIN_DAYS_IN - din, MIN_DAYS_IN - age, 1)
-            out[a] = f"👀 WATCH — in top-100 {din}/{LOOKBACK} days; check again in ~{need}d"; continue
+        if din < MIN_DAYS_IN_ or age < MIN_DAYS_IN_:
+            need = max(MIN_DAYS_IN_ - din, MIN_DAYS_IN_ - age, 1)
+            out[a] = f"👀 WATCH — in top-100 {din}/{LOOKBACK_} days; check again in ~{need}d"; continue
         r = series[a]
         last7 = r[r.index.isin(days_all[-7:])]
         prev7 = r[r.index.isin(days_all[-14:-7])]
@@ -91,5 +95,16 @@ def gate_all(hist, signals, today):
         life = 1 / max(1 - p, 1e-3)
         if life < MIN_LIFE:
             out[a] = f"❌ SHORT WAVES — at this rank products last ~{life:.0f} days on average"; continue
-        out[a] = f"✅ STOCK-READY — {din}/{LOOKBACK} days in top-100, typical stay ~{min(life, 365):.0f}d; get quotes"
+        out[a] = f"✅ STOCK-READY — {din}/{LOOKBACK_} days in top-100, typical stay ~{min(life, 365):.0f}d; get quotes"
     return out
+
+
+def preview(hist, signals, today):
+    """ADMIN-ONLY early look while history < MIN_HISTORY: same tests, scaled to the days we have
+    (persistence = in top-100 on ≥ 2/3 of them). Less reliable — never used for decisions."""
+    if hist is None or hist.empty:
+        return {}, 0
+    n = hist.loc[hist["list"] == "bestsellers", "date"].nunique()
+    if n >= MIN_HISTORY or n < 5:
+        return {}, n
+    return gate_all(hist, signals, today, min_history=n, lookback=n, min_days_in=max(3, -(-2 * n // 3))), n

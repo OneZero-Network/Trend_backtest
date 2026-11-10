@@ -2133,14 +2133,74 @@ def auto_competition(queries, audiences):
     return out
 
 
+def auto_focus(focus_words):
+    """Searches aimed at the focus niche (only when BR_AUTO_FOCUS_WORDS is set)."""
+    qs = automation.focus_queries(focus_words)
+    if not qs:
+        return []
+    out, seen = [], set()
+    since90 = int((datetime.now(timezone.utc) - timedelta(days=90)).timestamp())
+    hdr = {"Accept": "application/vnd.github+json", "User-Agent": "bazaar-radar"}
+    if GITHUB_API_TOKEN:
+        hdr["Authorization"] = f"Bearer {GITHUB_API_TOKEN}"
+    gh_since = (datetime.now(timezone.utc) - timedelta(days=180)).strftime("%Y-%m-%d")
+    for q in qs:
+        for tag in ("story", "comment"):                       # HN comments hold most "is there a tool…" asks
+            j = _get_json("https://hn.algolia.com/api/v1/search", {"query": q, "tags": tag,
+                           "numericFilters": f"created_at_i>{since90}", "hitsPerPage": 30})
+            for h in j.get("hits", []):
+                text = h.get("title") or re.sub(r"<[^>]+>", " ", str(h.get("comment_text", "")))[:300]
+                url = f"https://news.ycombinator.com/item?id={h.get('objectID')}"
+                if url in seen or not text:
+                    continue
+                seen.add(url)
+                out.append({"source": "hn", "text": text, "url": url,
+                            "weight": int(h.get("points") or 0) + int(h.get("num_comments") or 0) + (5 if tag == "comment" else 0)})
+            time.sleep(0.5)
+        word = q.replace(" tool", "")
+        j = _get_json("https://api.github.com/search/issues",
+                      {"q": f'"{word}" in:title is:issue is:open created:>{gh_since} reactions:>=3',
+                       "sort": "reactions-+1", "order": "desc", "per_page": 30}, headers=hdr)
+        for it in j.get("items", []):
+            if it.get("html_url") in seen:
+                continue
+            seen.add(it.get("html_url"))
+            title = str(it.get("title", ""))
+            if re.search(r"\b(feature|request|add|support|option|allow|would be|enhancement|proposal)\b", title, re.I) or \
+                    any(str(l.get("name", "")).lower() in ("enhancement", "feature", "feature request") for l in it.get("labels", [])):
+                out.append({"source": "github_issue", "text": title, "url": it.get("html_url"),
+                            "weight": int((it.get("reactions") or {}).get("+1", 0)) + int(it.get("comments") or 0)})
+        time.sleep(2.5 if GITHUB_API_TOKEN else 7)
+        p = {"order": "desc", "sort": "relevance", "q": word, "site": "softwarerecs", "pagesize": 30}
+        if STACKEXCHANGE_KEY:
+            p["key"] = STACKEXCHANGE_KEY
+        j = _get_json("https://api.stackexchange.com/2.3/search/advanced", p)
+        out += [{"source": "softwarerecs", "text": x.get("title", ""), "url": x.get("link", ""),
+                 "weight": int(x.get("view_count", 0)) + 20 * int(x.get("score", 0))} for x in j.get("items", [])
+                if x.get("link") not in seen]
+        time.sleep(1)
+    log(f"Automation: focus searches ({', '.join(qs)}) → {len(out)} items")
+    return out
+
+
 def main_automation():
     log(f"🛠 BAZAAR RADAR — open needs / automation opportunities · {TODAY}")
     store = Store()
     week = (pd.Timestamp(TODAY) - timedelta(days=pd.Timestamp(TODAY).weekday())).strftime("%Y-%m-%d")
-    items = auto_gh_issues() + auto_hn() + auto_stackoverflow() + auto_trends(TODAY)
+    items = auto_gh_issues() + auto_hn() + auto_stackoverflow() + auto_trends(TODAY) + auto_focus(BR_AUTO_FOCUS_WORDS)
     raw_n = len(items)
     items = [it for it in items if not discovery.BANNED.search(str(it.get("text", ""))) and automation.is_tool_ask(it)]
-    log(f"Automation: {len(items)} of {raw_n} items are real tool requests (launches and debugging questions dropped)")
+    new_n = len(items)
+    log(f"Automation: {new_n} of {raw_n} items are real tool requests (launches and debugging questions dropped)")
+    old_asks = store.read("ASKS")
+    items = automation.merge_window(items, old_asks.to_dict("records") if not old_asks.empty else [], TODAY)
+    store.write("ASKS", pd.DataFrame(items).astype(str))
+    for it in items:
+        try:
+            it["weight"] = float(it.get("weight") or 0)
+        except ValueError:
+            it["weight"] = 0.0
+    log(f"Automation: {len(items)} requests in the {automation.WINDOW_WEEKS}-week window")
     groups = automation.cluster_needs(items)
     # GitHub supply check only for the strongest groups (rate limits): more sources / requests first
     groups.sort(key=lambda g: (-len({it["source"] for it in g["items"]}), -len(g["items"]),
@@ -2172,7 +2232,7 @@ def main_automation():
     by_src = {}
     for it in items:
         by_src[it["source"]] = by_src.get(it["source"], 0) + 1
-    L = [f"🛠 <b>What people want built</b> — week of {week} · v1.39 (admin only · for bizopstool)",
+    L = [f"🛠 <b>What people want built</b> — week of {week} · v1.40 (admin only · for bizopstool)",
          "Requests read: " + " · ".join(f"{k} {v}" for k, v in sorted(by_src.items())) + f" → {len(groups)} distinct needs"
          + (f" · focus words: {', '.join(BR_AUTO_FOCUS_WORDS)}" if BR_AUTO_FOCUS_WORDS else " · ⚠️ no focus words set (BR_AUTO_FOCUS_WORDS)")
          + ("" if BRAVE_API_KEY else " · web crowding: not checked (no BRAVE_API_KEY)")]
@@ -2180,9 +2240,11 @@ def main_automation():
     parked = [r for r in rows if not r["fits_focus"]]
     strong = [r for r in infocus if r["confidence"] in ("Medium", "High")]
     weak = [r for r in infocus if r["confidence"] == "Low"]
-    L.append(f"Real tool requests this week: {len(items)} of {raw_n} items · {len(strong)} needs with enough evidence")
+    L.append(f"Real tool requests: {new_n} new of {raw_n} items · {len(items)} in the {automation.WINDOW_WEEKS}-week memory · "
+             f"{len(strong)} needs with enough evidence")
     if not strong:
-        L.append("\n<b>No need has enough evidence this week</b> (4+ asks from 2+ sources). Nothing to act on.")
+        L.append("\n<b>No need has enough evidence yet</b> (4+ vote-weighted asks from 2+ sources, or one heavily "
+                 "voted request). Evidence accumulates over 8 weeks.")
     for r in strong[:6]:
         star = "⭐" if r["status"].startswith("SHORTLIST") else "🔗"
         comp = []
@@ -2193,6 +2255,8 @@ def main_automation():
         if r["gh_easy"]: comp.append(f"{r['gh_easy']} easy GitHub tools")
         L.append(f"\n{star} <b>{_esc(r['name'])}</b> [{r['audience']}] — {r['gap']} · confidence {r['confidence']} · effort {r['effort']}"
                  + (" · 📊 data edge" if str(r["data_edge"]) == "True" else "") + (" · ⚠️ regulated" if r["regulated"] else ""))
+        L.append(f"   evidence: {r['requests']} asks ≈ {r.get('eff_asks')} counting votes"
+                 + (f" ({r.get('votes')} 👍/points)" if int(r.get('votes') or 0) else "") + f" · sources {_esc(r['sources'])}")
         L.append(f"   score {r['score']} = {_esc(r['score_parts'])}")
         L.append(f"   competition: {_esc('; '.join(comp) or 'none found')}")
         if r["links"]:
@@ -2284,7 +2348,7 @@ def main():
             log(f"Backup schedule: today's data ({TODAY}) already fetched — skipping (avoids extra Amazon requests)")
             return
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.39 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.40 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -2421,7 +2485,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.39 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.40 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if "signals" in locals() and not signals.empty and "stock_gate" in signals:
         sg = signals["stock_gate"].astype(str)

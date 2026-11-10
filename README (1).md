@@ -130,6 +130,13 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.40: evidence counts votes, builds up over 8 weeks, and searches your focus
+The first v1.39 run kept 106 real requests but found 0 needs with enough evidence. That wasn't because the filter was too strict, but because the evidence rule ignored votes, reset every week, and the searches weren't aimed at the focus niche.
+- **Votes count:** each request = 1 + extra for its votes or views (GitHub +1 per 25 👍, HN +1 per 40 points, Software Recs +1 per 1,500 views; capped at +10). A single heavily voted request (50+ 👍 issue, 100+ point HN post, 5,000+ view Software Recs question) reaches **Medium** confidence on its own.
+- **8-week memory (ASKS tab):** requests are stored and regrouped with the last 8 weeks, so a need asked a few times a month adds up.
+- **Focus searches:** with `BR_AUTO_FOCUS_WORDS` set, the engine also searches HN **posts and comments** (last 90 days), GitHub feature requests with the word in the title (last 180 days, 3+ 👍) and Software Recommendations, for each focus word ("llm tool", "token tool", "api cost"…). The same tool-request filter applies.
+- The report shows evidence per need: asks, vote-weighted asks, total 👍/points, sources.
+
 ## v1.39: only real tool requests count (from the first live run, 10 Nov)
 The first live v1.38 run read 430 items and reported 411 "needs", nearly all noise: 199 Stack Overflow debugging questions, "Show HN" launches counted as demand, and unreadable word-fragment names.
 - **Only tool requests count as demand:** "is there a tool / app / library…", "looking for…", "alternative to…", "how do I automate / bulk / batch…", "tool to convert / export / sync…". GitHub feature requests, Google Trends tool searches and Software Recommendations questions count as requests by nature.

@@ -416,8 +416,10 @@ def open_rows_v2(groups, supply, extra, week, history_rows=None, top_n=10, weeks
         top = [t for t in sp.get("gh_top", [])]
         ex = sorted(g["items"], key=lambda it: -float(it.get("weight") or 0))
         hk = key if key in prev else match_history(set(key.split()), prev.keys())
+        ev = evidence(g["items"])
         rows.append({"week": week, "bucket": hk or key, "problem": " ".join(g["core"]), "gap": kind,
                      "score": round(min(100.0, d * factor), 1), "sources": ",".join(srcs), "requests": len(g["items"]),
+                     "eff_asks": ev["eff_asks"], "strong_single": ev["strong_single"], "votes": ev["votes"],
                      "audience": j["audience"], "effort": j["effort"], "data_edge": j["data_edge"],
                      "smb_group": ",".join(smb), "commercial": ", ".join(j["commercial"]),
                      "show_hn_launches": launches, "npm_packages": npm,
@@ -507,7 +509,8 @@ def finalize_v38(rows, groups_by_key, web, focus_words=None):
         r["web_examples"] = w.get("web_examples", "") if w else ""
         text = f"{r['problem']} {r['examples']}"
         r["regulated"] = bool(REGULATED.search(text))
-        r["confidence"] = confidence(int(r["requests"]), len(str(r["sources"]).split(",")))
+        r["confidence"] = confidence_v2(float(r.get("eff_asks", r["requests"])), len(str(r["sources"]).split(",")),
+                                        str(r.get("strong_single")) == "True")
         r["fits_focus"] = fits_focus(text, focus_words or [])
         base_gap = r["gap"]
         if r["web_tool_pages"] >= 3 and base_gap in ("BUILD", "PACKAGE"):
@@ -573,3 +576,55 @@ def display_name(group):
     t = re.sub(r"^\s*(is there (a|an|any)\s+(good\s+)?(tool|app|library|way|service|extension)\s+(that|to|for)\s+)", "", t, flags=re.I)
     t = re.sub(r"\?+$", "", t).strip()
     return (t[:70] + "…") if len(t) > 70 else t
+
+
+
+# ══════════════════════════════════════════════════════════════════════
+# v1.40 — votes count, evidence accumulates over 8 weeks, searches aimed at the focus
+# ══════════════════════════════════════════════════════════════════════
+# One request with 300 👍 is 300 people asking. Each request counts 1 + extra for its votes (capped at +10).
+VOTE_UNIT = {"github_issue": 25, "hn": 40, "softwarerecs": 1500, "stackoverflow": 3000, "gtrends": 1000}
+STRONG = {"github_issue": 50, "hn": 100, "softwarerecs": 5000, "stackoverflow": 20000}
+WINDOW_WEEKS = 8
+
+
+def evidence(items):
+    eff, votes, strong = 0.0, 0, False
+    for it in items:
+        w = float(it.get("weight") or 0)
+        src = it.get("source")
+        eff += 1 + min(10.0, w / VOTE_UNIT.get(src, 1000))
+        votes += int(w) if src in ("github_issue", "hn") else 0
+        strong = strong or w >= STRONG.get(src, 10 ** 9)
+    return {"eff_asks": round(eff, 1), "votes": votes, "strong_single": strong}
+
+
+def confidence_v2(eff_asks, n_sources, strong_single=False):
+    """High: 8+ effective asks from 3+ sources · Medium: 4+ effective asks from 2+ sources, OR one heavily
+    voted request (e.g. 50+ 👍 issue, 100+ point HN post) · otherwise Low."""
+    if eff_asks >= 8 and n_sources >= 3:
+        return "High"
+    if (eff_asks >= 4 and n_sources >= 2) or strong_single:
+        return "Medium"
+    return "Low"
+
+
+def focus_queries(focus_words, n=6):
+    """Searches aimed at the niche: '<word> tool', '<word> cost', … (multi-word focus terms used as they are)."""
+    words = [w for w in (focus_words or []) if w.strip()]
+    out = []
+    for w in words:
+        out.append(f"{w} tool" if " " not in w else w)
+    return out[:n]
+
+
+def merge_window(current, stored, today, weeks=WINDOW_WEEKS):
+    """Current items + stored items from the last `weeks` weeks, de-duplicated by link (newest weight kept)."""
+    cutoff = (datetime.fromisoformat(str(today)[:10]) - timedelta(weeks=weeks)).strftime("%Y-%m-%d")
+    by = {}
+    for it in stored or []:
+        if str(it.get("seen", "")) >= cutoff:
+            by[it.get("url") or it.get("text")] = dict(it)
+    for it in current:
+        by[it.get("url") or it.get("text")] = {**it, "seen": str(today)[:10]}
+    return list(by.values())

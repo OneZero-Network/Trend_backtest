@@ -181,6 +181,26 @@ parts = tf.split_message(long)
 check("long Telegram messages split at line breaks — no link cut in half",
       len(parts) > 1 and all(p.count("<a ") == p.count("</a>") for p in parts) and all(len(p) <= 3900 for p in parts))
 
+# ── v1.40 — votes count, 8-week memory, focus searches
+ev = A.evidence([{"source": "github_issue", "text": "x", "weight": 300}])
+check("one issue with 300 👍 counts as ~11 asks and is a strong single signal",
+      ev["eff_asks"] == 11.0 and ev["strong_single"] and ev["votes"] == 300, ev)
+check("strong single signal → Medium confidence on its own", A.confidence_v2(11, 1, True) == "Medium")
+check("weak single ask stays Low", A.confidence_v2(1.2, 1, False) == "Low")
+check("4+ weighted asks from 2 sources → Medium; 8+ from 3 → High",
+      A.confidence_v2(4.5, 2) == "Medium" and A.confidence_v2(9, 3) == "High")
+w = A.merge_window([{"source": "hn", "text": "new ask", "url": "u3", "weight": 5}],
+                   [{"source": "hn", "text": "old ask", "url": "u1", "weight": 4, "seen": "2026-10-20"},
+                    {"source": "hn", "text": "too old", "url": "u2", "weight": 4, "seen": "2026-08-01"},
+                    {"source": "hn", "text": "new ask", "url": "u3", "weight": 1, "seen": "2026-11-02"}], "2026-11-10")
+check("8-week memory keeps recent asks, drops old ones, de-duplicates by link (newest kept)",
+      sorted(x["text"] for x in w) == ["new ask", "old ask"] and [x for x in w if x["url"] == "u3"][0]["weight"] == 5, w)
+check("focus searches built from focus words", A.focus_queries(["llm", "api cost"]) == ["llm tool", "api cost"])
+grp = A.cluster_needs([{"source": "github_issue", "text": "Feature request: show token cost per request in the dashboard", "weight": 120}])
+rr = A.finalize_v38(A.open_rows_v2(grp, {}, {}, "2026-11-09"), {}, {}, focus_words=["token", "llm"])[0]
+check("a single 120-👍 in-focus feature request now counts as Medium evidence (not discarded)",
+      rr["confidence"] == "Medium" and rr["fits_focus"], (rr["confidence"], rr.get("eff_asks")))
+
 # offline end-to-end run (all four sources simulated)
 import trend_fetcher as tf
 TMP = tempfile.mkdtemp(); tf.LOCAL_OUT_DIR = TMP; tf.TODAY = "2026-11-10"
@@ -192,14 +212,16 @@ calls = []
 tf.auto_github = lambda q: (calls.append(q), {k: {"gh_total": 2, "gh_maintained": 0, "gh_easy": 0, "gh_top": [
     {"repo": "x/y", "stars": 40, "updated": "2026-10-01", "licence": "mit", "reusable": True, "url": "u"}]} for k in q})[1]
 tf.auto_competition = lambda q, a: {k: {"show_hn": 0} for k in q}
+tf.auto_focus = lambda fw: []
 sent = []; tf.send_telegram = sent.append
 tf.main_automation()
 op = pd.read_csv(os.path.join(TMP, "OPPORTUNITIES.csv"))
 check("OPPORTUNITIES: discovered needs for the week", set(op["week"]) == {"2026-11-09"} and len(op) == 2, op[["bucket", "sources"]])
 check("banned topics never reach the report (rummy)", not op["examples"].astype(str).str.contains("rummy").any())
 check("GitHub supply checked per need", calls and len(calls[0]) == 2)
-check("admin message v1.39: real-request count, evidence verdict, focus warning, licence rule",
-      sent and "v1.39" in sent[0] and "Real tool requests this week" in sent[0]
+check("ASKS memory tab written", os.path.exists(os.path.join(TMP, "ASKS.csv")))
+check("admin message v1.40: real-request count, 8-week memory, evidence verdict, focus warning, licence rule",
+      sent and "v1.40" in sent[0] and "8-week memory" in sent[0]
       and ("enough evidence" in sent[0]) and "no focus words set" in sent[0] and "do NOT reuse" in sent[0], sent[:1])
 check("WAITLIST tab created", os.path.exists(os.path.join(TMP, "WAITLIST.csv")))
 tf.main_automation()

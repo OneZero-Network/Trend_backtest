@@ -6,7 +6,7 @@ name: Bazaar Radar — Affiliate drip posts (every 2 h, 9 am–9 pm IST)
 # Times are UTC: 03:30 … 15:30 UTC = 9 am … 9 pm IST. GitHub may start scheduled runs a few minutes late.
 on:
   schedule:
-    - cron: "30 3-15/2 * * *"
+    - cron: "30 3-15/2 * * *"   # BACKUP — the Cloudflare Worker starts it on time; a run within 75 min of the last post does nothing
   workflow_dispatch:
 
 concurrency:

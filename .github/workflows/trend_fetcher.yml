@@ -4,7 +4,7 @@ on:
   # 09:30 IST daily (04:00 UTC). Daily, not weekday-only: e-commerce sells 7 days
   # a week, and gaps in HISTORY weaken the rank-velocity signal.
   schedule:
-    - cron: "15 2 * * *"     # 07:45 IST — data ready before the 9 am drip post
+    - cron: "0 3 * * *"      # BACKUP 08:30 IST — the Cloudflare Worker starts it at 07:45; this run exits if data is already in
   workflow_dispatch:
     inputs:
       reason:

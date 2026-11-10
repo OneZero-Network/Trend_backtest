@@ -1,0 +1,55 @@
+name: Bazaar Radar — Independent discovery (Google Trends + YouTube, daily)
+
+# Finds products WITHOUT starting from Amazon's lists. Results → DISCOVERY tab + admin chat. Nothing posted.
+# 11:00 IST daily (05:30 UTC). Not time-critical, so GitHub's own schedule is fine here.
+on:
+  schedule:
+    - cron: "30 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write          # daily discovery file → data-archive branch
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          pip install requests pandas beautifulsoup4 gspread google-auth openpyxl
+          pip install pytrends || echo "pytrends failed — Trends skipped"
+      - name: Discover
+        env:
+          BR_MODE:            discover
+          GOOGLE_CREDS_JSON:  ${{ secrets.GOOGLE_CREDS_JSON }}
+          GOOGLE_SHEET_ID:    ${{ secrets.GOOGLE_SHEET_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          YOUTUBE_API_KEY:    ${{ secrets.YOUTUBE_API_KEY }}
+        run: python trend_fetcher.py
+      - name: Archive today's data permanently (data-archive branch)
+        if: always()
+        run: |
+          [ -d output/archive ] || { echo "No archive files this run"; exit 0; }
+          A=$(mktemp -d) && cp -r output/archive/. "$A"/
+          git config user.name  "bazaar-radar-bot"
+          git config user.email "bazaar-radar-bot@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin data-archive >/dev/null 2>&1; then
+            git fetch --depth=1 origin data-archive
+            git checkout -f -B data-archive FETCH_HEAD
+          else
+            git checkout --orphan data-archive
+            git rm -rf --quiet . || true
+            printf "# Bazaar Radar daily archive\n\narchive/YYYY-MM-DD/{history,signals,gtrends}.csv.gz — one folder per day, kept forever.\n" > README.md
+            git add README.md
+          fi
+          mkdir -p archive && cp -r "$A"/. archive/
+          git add archive
+          git commit -m "archive $(date -u +%F)" || echo "Nothing new to archive"
+          git push origin data-archive
+

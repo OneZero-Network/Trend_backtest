@@ -133,6 +133,22 @@ def rise_value(v):
         return 0.0
 
 
+LEARN_WORDS = re.compile(r"\b(course|courses|class|classes|coaching|tutorial|tutorials|learn|learning|training|"
+                         r"certification|certificate|for beginners|beginners|roadmap|interview questions|projects?|"
+                         r"syllabus|notes|in hindi|full course|bootcamp|practice|exercises?)\b", re.I)
+
+
+def seed_ok(seed, lane, today):
+    """A growing seed must still pass today's filters (lane rules, bans, season window)."""
+    if not is_product_phrase(seed, lane):
+        return False
+    if lane == "products":
+        import compliance, season
+        if not season.window(compliance.seasonal_flag(seed), today)["affiliate_ok"]:
+            return False
+    return True
+
+
 def active_seeds(seed_rows, today, base=BASE_SEEDS, lane="products"):
     """seed_rows: [{'seed','added','last_rising','lane'}] → base + this lane's snowball seeds still active."""
     t = datetime.fromisoformat(str(today)[:10])
@@ -145,7 +161,8 @@ def active_seeds(seed_rows, today, base=BASE_SEEDS, lane="products"):
             age = (t - datetime.fromisoformat(last[:10])).days
         except ValueError:
             continue
-        if 0 <= age <= SNOWBALL_DAYS and r["seed"] not in base and r["seed"] not in live:
+        if 0 <= age <= SNOWBALL_DAYS and r["seed"] not in base and r["seed"] not in live \
+                and seed_ok(r["seed"], lane, today):          # re-checked daily: yesterday's noise can't come back
             live.append(r["seed"])
     # up to 3 growing seeds go FIRST (the daily per-lane cap would otherwise cut them), then today's slice
     grow = [s for s in live if s not in base][:3]
@@ -167,16 +184,38 @@ def update_seeds(seed_rows, trend_rows, today):
     return [r for r in by.values() if max(str(r.get("added")), str(r.get("last_rising"))) >= cutoff]
 
 
-def trends_rows(related, seed, today, lane="products"):
-    """related: (query, value) pairs (pytrends 'rising') → cleaned phrases for this lane."""
+def relevant(q, seed, lane):
+    """Is this rising search really about the lane?
+    products: shares a seed word · skills: shares a seed word AND has a learning word ('python course', not
+    'burmese python') · apps: shares a seed word, OR is a comparison ('capcut alternative'), OR is a short
+    tool/brand name (≤3 words) — app searches are mostly brand names; YouTube must confirm them anyway."""
+    if lane == "skills":
+        return about_seed(q, seed) and bool(LEARN_WORDS.search(str(q)))
+    if lane == "apps":
+        return (about_seed(q, seed) or bool(re.search(r"\b(alternatives?|vs|versus|like)\b", str(q), re.I))
+                or len(re.findall(r"[a-z0-9]+", str(q).lower())) <= 3)
+    return about_seed(q, seed)
+
+
+def trends_rows(related, seed, today, lane="products", stats=None):
+    """related: (query, value) pairs (pytrends 'rising') → cleaned phrases for this lane.
+    stats (dict, optional) counts why results were dropped — shown in the log/summary."""
     out = []
+    st = stats if stats is not None else {}
     for q, v in related:
-        comparison = lane == "apps" and re.search(r"\b(alternatives?|vs|versus|like)\b", str(q), re.I)
-        if not is_product_phrase(q, lane) or not (about_seed(q, seed) or comparison):
-            continue
+        st["raw"] = st.get("raw", 0) + 1
+        if not is_product_phrase(q, lane):
+            st["blocked"] = st.get("blocked", 0) + 1; continue
+        if not relevant(q, seed, lane):
+            st["off_topic"] = st.get("off_topic", 0) + 1; continue
         rise = rise_value(v)
         if rise < MIN_RISE:
-            continue
+            st["weak"] = st.get("weak", 0) + 1; continue
+        if lane == "products":
+            import compliance, season
+            if not season.window(compliance.seasonal_flag(q), today)["affiliate_ok"]:
+                st["out_of_season"] = st.get("out_of_season", 0) + 1; continue
+        st["kept"] = st.get("kept", 0) + 1
         out.append({"date": today, "source": "gtrends", "phrase": clean_phrase(q, lane), "query": str(q),
                     "seed": seed, "rise": rise, "lane": lane})
     return out

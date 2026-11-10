@@ -130,6 +130,14 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.34: discovery fixes from the second run on 10 Nov
+- **Growing seeds are rechecked daily** against the current filters and festival window, so earlier noise ("jobs hunt stripe engineer", "namjooning stanford") can't come back as a seed.
+- **Skills need a learning word** (course, tutorial, learn, certification, roadmap, …): "python course" ✓, "burmese python…" ✗.
+- **Apps accept short brand or tool names** (≤3 words, e.g. "capcut pc"), because app searches are mostly brands. They still need YouTube confirmation to count as 2+ sources.
+- **Products are checked against the festival window,** so post-Diwali "diwali gift hamper same day" is dropped.
+- **The summary shows, per lane, how many searches were found and why each was dropped** (blocked, off-topic, weak, out of season, seeds with no rising searches).
+- **YouTube:** a refused search (429) waits and retries; if it still fails, it's skipped and the rest continue. Only "daily quota used up" stops YouTube for the day.
+
 ## v1.33: discovery seeds fixed (fewer films and news, more real products)
 On 10 Nov, the broad seeds ("flipkart", "amazon", "course", "software") produced films, K-pop news, a local tutor and a forensics company. The daily fetch's specific seeds found real products the same day ("hot lunch box for office" +144,800%).
 - **Specific seeds, rotated daily:** 42 product types (10 a day), 25 skills (5 a day) and 25 software types (5 a day), defined in `discovery.py` (PRODUCT_SEEDS, SKILL_SEEDS, APP_SEEDS). Up to 3 growing seeds go first.

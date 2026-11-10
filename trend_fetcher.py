@@ -1750,6 +1750,9 @@ BR_B2B_MIN_PRICE     = int(os.environ.get("BR_B2B_MIN_PRICE") or 299)
 BR_DISC_MAX_LINKS    = int(os.environ.get("BR_DISC_MAX_LINKS") or 300)
 
 
+DISC_STATS = {}
+
+
 def disc_trends(seeds_by_lane, today):
     """seeds_by_lane: {lane: [seeds]} → (rows, refusals). Products use Google's Shopping category;
     skills and apps search all categories (courses/apps aren't 'Shopping')."""
@@ -1766,12 +1769,16 @@ def disc_trends(seeds_by_lane, today):
         cap = max(2, int(BR_DISC_TRENDS_CALLS * DISC_LANE_CALLS.get(lane, 0.25)))
         plan += [(lane, s) for s in seeds[:cap]]
     rows, fails = [], 0
+    DISC_STATS.clear()
     for lane, seed in plan:
         try:
             pt.build_payload([seed], timeframe="now 7-d", geo="IN", cat=18 if lane == "products" else 0)
             rq = pt.related_queries().get(seed, {}).get("rising")
             if rq is not None and not rq.empty:
-                rows += discovery.trends_rows(zip(rq["query"], rq["value"]), seed, today, lane=lane)
+                rows += discovery.trends_rows(zip(rq["query"], rq["value"]), seed, today, lane=lane,
+                                              stats=DISC_STATS.setdefault(lane, {}))
+            else:
+                DISC_STATS.setdefault(lane, {})["empty_seeds"] = DISC_STATS.setdefault(lane, {}).get("empty_seeds", 0) + 1
             time.sleep(6 + random.uniform(0, 4))
         except Exception as exc:
             fails += 1
@@ -1788,13 +1795,19 @@ def disc_youtube(today):
         log("Discovery: YOUTUBE_API_KEY not set — YouTube skipped", "WARN")
         return [], 0
     after = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    ids = []
+    ids, yfails = [], 0
     try:
         for q in discovery.YT_QUERIES:
-            j = youtube_check._get(requests.Session(), "search", {
-                "key": YOUTUBE_API_KEY, "part": "snippet", "q": q, "type": "video", "regionCode": "IN",
-                "publishedAfter": after, "maxResults": 25, "order": "viewCount"})
-            ids += [it["id"]["videoId"] for it in j.get("items", []) if it["id"].get("videoId")]
+            try:
+                j = youtube_check._get(requests.Session(), "search", {
+                    "key": YOUTUBE_API_KEY, "part": "snippet", "q": q, "type": "video", "regionCode": "IN",
+                    "publishedAfter": after, "maxResults": 25, "order": "viewCount"})
+                ids += [it["id"]["videoId"] for it in j.get("items", []) if it["id"].get("videoId")]
+            except RuntimeError:
+                raise                                        # daily quota used up → stop YouTube for today
+            except Exception as exc:
+                yfails += 1
+                log(f"  YouTube search '{q}' refused ({type(exc).__name__}) — skipping it, continuing", "WARN")
         ids = list(dict.fromkeys(ids))
         videos = []
         for i in range(0, len(ids), 50):
@@ -1892,9 +1905,17 @@ def main_discover():
     agree = [r for r in prod if r["status"] == "2+ sources"]
     yt3 = [r for r in prod if r["kind"] != "phrase" and int(r["creators"]) >= discovery.MIN_CREATORS]
     tr = [r for r in prod if r["kind"] == "phrase"]
+    def _st(lane):
+        s = DISC_STATS.get(lane, {})
+        return (f"{s.get('raw', 0)} found → {s.get('kept', 0)} kept (blocked {s.get('blocked', 0)}, "
+                f"off-topic {s.get('off_topic', 0)}, weak {s.get('weak', 0)}"
+                + (f", out of season {s['out_of_season']}" if s.get("out_of_season") else "")
+                + (f", seeds with no rising searches {s['empty_seeds']}" if s.get("empty_seeds") else "") + ")")
+    for lane in ("products", "skills", "apps"):
+        log(f"Discovery Trends [{lane}]: {_st(lane)}")
     L = [f"🧭 <b>Discovery</b> — {TODAY} (independent of Amazon's lists; not posted)",
-         f"Google Trends: {len(tr)} product searches rising from {min(len(seeds), BR_DISC_TRENDS_CALLS)} seeds"
-         + (f" · ⚠️ {tfails} refused" if tfails else ""),
+         f"Google Trends: {len(tr)} product searches kept" + (f" · ⚠️ {tfails} refused" if tfails else ""),
+         f"  products: {_st('products')}", f"  skills: {_st('skills')}", f"  apps: {_st('apps')}",
          f"YouTube: {nvid} shopping videos → {len(yt3)} products linked by {discovery.MIN_CREATORS}+ creators"]
     if agree:
         L.append("\n✅ <b>2+ sources agree</b>")
@@ -1997,7 +2018,7 @@ def main():
             log(f"Backup schedule: today's data ({TODAY}) already fetched — skipping (avoids extra Amazon requests)")
             return
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.33 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.34 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -2134,7 +2155,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.33 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.34 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if "signals" in locals() and not signals.empty and "stock_gate" in signals:
         sg = signals["stock_gate"].astype(str)

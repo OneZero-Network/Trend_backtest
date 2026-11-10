@@ -38,7 +38,7 @@ def _get(session, path, params):
             return r.json()
         if r.status_code == 403 and "quota" in r.text.lower():
             raise RuntimeError("YouTube quota exceeded for today")
-        time.sleep(3 * (attempt + 1))
+        time.sleep(30 * (attempt + 1) if r.status_code == 429 else 3 * (attempt + 1))   # 429 = slow down
     r.raise_for_status()
 
 

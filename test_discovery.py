@@ -105,15 +105,36 @@ check("growing seeds stay in their own lane", "power bi" in D.active_seeds(seeds
 # ── v1.33: the 10 Nov noise must be rejected; the 10 Nov real products kept
 noise = [("jailer 2 prime release date", "amazon", "products"), ("iphone 17 pro diwali", "flipkart", "products"),
          ("namjooning stanford", "course", "skills"), ("mehul sir tuition ahmedabad", "classes", "skills"),
-         ("jobs hunt stripe engineer", "software", "apps"), ("cellebrite", "software", "apps")]
+         ("jobs hunt stripe engineer", "software", "apps")]
 check("10 Nov noise rejected (not about its seed, or film/job/news)",
       not any(D.trends_rows([(q, 5000)], sd, "2026-11-10", lane=ln) for q, sd, ln in noise),
       [q for q, sd, ln in noise if D.trends_rows([(q, 5000)], sd, "2026-11-10", lane=ln)])
+cel = D.combine(D.trends_rows([("cellebrite", 650)], "password manager", "2026-11-10", lane="apps"), [], [], [], "2026-11-10")
+check("trade-off: a short brand name like 'cellebrite' passes Trends, but stays 'watch' without YouTube confirmation",
+      cel and cel[0]["status"] == "watch", cel)
 real = [("hot lunch box for office", "lunch box", "products"), ("self heating lunch box", "lunch box", "products"),
-        ("folding storage box", "storage box", "products"), ("excel copilot", "excel", "skills"),
+        ("folding storage box", "storage box", "products"), ("excel course in hindi", "excel", "skills"),
         ("capcut alternative", "video editor", "apps"), ("ai video editor free", "video editor", "apps")]
 kept = {q: D.trends_rows([(q, 5000)], sd, "2026-11-10", lane=ln) for q, sd, ln in real}
 check("real product / skill / app searches kept", all(kept.values()), [q for q, v in kept.items() if not v])
+# v1.34 — from the 2nd run on 10 Nov
+old_noise = [{"seed": q, "added": "2026-11-10", "last_rising": "2026-11-10", "lane": ln} for q, ln in
+             [("jobs hunt stripe engineer", "apps"), ("namjooning stanford", "skills"), ("iphone 17 pro diwali", "products")]]
+check("yesterday's noise can't return as growing seeds",
+      "jobs hunt stripe engineer" not in D.active_seeds(old_noise, "2026-11-11", ["vpn"], "apps")
+      and "namjooning stanford" not in D.active_seeds(old_noise, "2026-11-11", ["excel"], "skills")
+      and "iphone 17 pro diwali" not in D.active_seeds(old_noise, "2026-11-11", ["mop"], "products"))
+check("skills need a learning word: 'burmese python…' rejected, 'python course' kept",
+      not D.trends_rows([("burmese python concrete pipe nest", 18050)], "python", "2026-11-10", lane="skills")
+      and D.trends_rows([("python course free", 900)], "python", "2026-11-10", lane="skills"))
+check("apps: short brand searches allowed ('capcut pc'), YouTube still has to confirm",
+      D.trends_rows([("capcut pc", 900)], "video editor", "2026-11-10", lane="apps"))
+st = {}
+D.trends_rows([("diwali gift hamper same day", 550), ("corporate gift hamper", 900), ("gift hamper login", 900),
+               ("gift hamper", 50)], "gift hamper", "2026-11-10", stats=st)
+check("after Diwali: 'diwali gift hamper' dropped as out of season; counts explain every drop",
+      st == {"raw": 4, "out_of_season": 1, "kept": 1, "blocked": 1, "weak": 1}, st)
+
 check("rotation: different slice daily, whole list covered",
       D.lane_seeds("products", "2026-11-10") != D.lane_seeds("products", "2026-11-11")
       and set().union(*[D.lane_seeds("products", f"2026-11-{d:02d}") for d in range(10, 16)]) == set(D.PRODUCT_SEEDS))

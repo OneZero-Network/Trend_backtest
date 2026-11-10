@@ -1,0 +1,34 @@
+name: Bazaar Radar — Automation opportunities (weekly, admin only, for bizopstool)
+
+# Mondays 12:00 IST (06:30 UTC). Stack Overflow + Google Trends demand vs GitHub supply → OPPORTUNITIES tab.
+on:
+  schedule:
+    - cron: "30 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  automation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          pip install requests pandas beautifulsoup4 gspread google-auth openpyxl
+          pip install pytrends || echo "pytrends failed — Trends skipped"
+      - name: Find opportunities
+        env:
+          BR_MODE:            automation
+          GOOGLE_CREDS_JSON:  ${{ secrets.GOOGLE_CREDS_JSON }}
+          GOOGLE_SHEET_ID:    ${{ secrets.GOOGLE_SHEET_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_TOKEN:       ${{ secrets.GITHUB_TOKEN }}      # provided by GitHub automatically — nothing to set up
+          STACKEXCHANGE_KEY:  ${{ secrets.STACKEXCHANGE_KEY }}  # optional
+        run: python trend_fetcher.py

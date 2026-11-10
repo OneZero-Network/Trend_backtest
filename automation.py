@@ -347,6 +347,8 @@ EFFORT_L = re.compile(r"\b(ai|llm|gpt|model|machine learning|video|real.?time|sy
 EFFORT_S = re.compile(r"\b(convert\w*|formatter|format|generat\w*|calculat\w*|validat\w*|template|regex|json|csv|"
                       r"markdown|pdf|qr|barcode|counter|timer|cheat ?sheet|checklist|extension|bookmarklet)\b", re.I)
 DEV_WORDS = re.compile(r"\b(api|sdk|cli|npm|pip|python|javascript|typescript|react|node|docker|kubernetes|git|github|"
+                       r"llm|llms|ai|model|models|prompt|prompts|agent|agents|mcp|claude|gpt|openai|anthropic|"
+                       r"token|tokens|inference|embedding|rag|copilot|ide|editor|desktop app|"
                        r"vscode|neovim|vim|terminal|json|yaml|regex|sql|database|postgres|mysql|compiler|library|"
                        r"framework|plugin|webpack|vite|rust|golang|java|kotlin|swift|linux|bash|ci|deploy)\b", re.I)
 BIZ_WORDS = re.compile(r"\b(invoice|gst|billing|inventory|stock|seller|shop|store|customer|order|payroll|"
@@ -628,3 +630,30 @@ def merge_window(current, stored, today, weeks=WINDOW_WEEKS):
     for it in current:
         by[it.get("url") or it.get("text")] = {**it, "seen": str(today)[:10]}
     return list(by.values())
+
+
+
+# ══════════════════════════════════════════════════════════════════════
+# v1.41 — VENDOR-ONLY: a request to a closed product's own team (10 Nov: both "enough evidence" needs were
+# asks on anthropics/claude-code — only Anthropic can change its app)
+# ══════════════════════════════════════════════════════════════════════
+VENDOR_OWNERS = {"anthropics", "openai", "microsoft", "google", "googleapis", "google-gemini", "github", "apple",
+                 "meta-llama", "facebook", "aws", "awslabs", "cursor", "getcursor", "vercel", "jetbrains", "notion"}
+BUILD_OUTSIDE = re.compile(r"\b(api|cli|export|import|plugin|extension|add-?on|integration|webhook|hook|hooks|mcp|"
+                           r"sdk|proxy|base url|endpoint|self-?host\w*|open.?source|script|wrapper|bridge|"
+                           r"third.?party|external)\b", re.I)   # HOW it could be built outside — not WHAT it shows
+IN_APP_ONLY = re.compile(r"\b(bring back|restore|desktop app|mobile app|ui|button|panel|sidebar|setting|settings|"
+                         r"theme|dark mode|shortcut|keyboard|tab|menu|toggle|default|in the app|new session)\b", re.I)
+
+
+def vendor_only(group):
+    """True when every request is an issue on a big vendor's own repo AND asks for an in-app change that
+    can't be built from outside (no API / CLI / plugin / export / usage-tracking angle)."""
+    issues = [it for it in group["items"] if it.get("source") == "github_issue"]
+    if not issues or len(issues) != len(group["items"]):
+        return False
+    owners = {str(it.get("url", "")).split("github.com/")[-1].split("/")[0].lower() for it in issues}
+    if not owners <= VENDOR_OWNERS:
+        return False
+    text = " ".join(str(it.get("text", "")) for it in issues)
+    return not BUILD_OUTSIDE.search(text)        # default for a vendor's own repo: only the vendor can build it

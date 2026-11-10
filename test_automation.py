@@ -201,6 +201,22 @@ rr = A.finalize_v38(A.open_rows_v2(grp, {}, {}, "2026-11-09"), {}, {}, focus_wor
 check("a single 120-👍 in-focus feature request now counts as Medium evidence (not discarded)",
       rr["confidence"] == "Medium" and rr["fits_focus"], (rr["confidence"], rr.get("eff_asks")))
 
+# ── v1.41 — vendor-only (from the 10 Nov v1.40 run)
+vg = lambda *its: {"items": list(its)}
+gi = lambda t, u, w=50: {"source": "github_issue", "text": t, "url": u, "weight": w}
+cases = [(vg(gi("[FEATURE] Bring back the usage stats panel on the Desktop new session screen",
+               "https://github.com/anthropics/claude-code/issues/102264")), True),
+         (vg(gi("Mods - make Claude 10x more extensible", "https://github.com/anthropics/claude-code/issues/91870")), True),
+         (vg(gi("Support custom LLM proxy / base URL for context", "https://github.com/anthropics/claude-code/issues/1")), False),
+         (vg(gi("Add dark mode toggle", "https://github.com/someone/smalltool/issues/2")), False),
+         (vg(gi("Bring back usage panel", "https://github.com/anthropics/x/issues/3"),
+             {"source": "hn", "text": "Is there a tool that tracks Claude usage per session?", "url": "h", "weight": 30}), False)]
+got = [A.vendor_only(g) for g, _ in cases]
+check("vendor-only: in-app asks on vendor repos ✓; proxy/API angle, small repos, outside asks ✗",
+      got == [w for _, w in cases], got)
+check("LLM / AI requests are Developer audience, not General",
+      A.judge("Support custom LLM proxy / base URL for claude", [])["audience"] == "Developer")
+
 # offline end-to-end run (all four sources simulated)
 import trend_fetcher as tf
 TMP = tempfile.mkdtemp(); tf.LOCAL_OUT_DIR = TMP; tf.TODAY = "2026-11-10"
@@ -220,8 +236,8 @@ check("OPPORTUNITIES: discovered needs for the week", set(op["week"]) == {"2026-
 check("banned topics never reach the report (rummy)", not op["examples"].astype(str).str.contains("rummy").any())
 check("GitHub supply checked per need", calls and len(calls[0]) == 2)
 check("ASKS memory tab written", os.path.exists(os.path.join(TMP, "ASKS.csv")))
-check("admin message v1.40: real-request count, 8-week memory, evidence verdict, focus warning, licence rule",
-      sent and "v1.40" in sent[0] and "8-week memory" in sent[0]
+check("admin message v1.42: real-request count, 8-week memory, evidence verdict, focus warning, licence rule",
+      sent and "v1.42" in sent[0] and "8-week memory" in sent[0]
       and ("enough evidence" in sent[0]) and "no focus words set" in sent[0] and "do NOT reuse" in sent[0], sent[:1])
 check("WAITLIST tab created", os.path.exists(os.path.join(TMP, "WAITLIST.csv")))
 tf.main_automation()

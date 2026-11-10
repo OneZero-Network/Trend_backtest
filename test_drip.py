@@ -84,5 +84,41 @@ sent.clear(); tf.AFFILIATE_CHAT_ID = ""
 run_at("2026-11-12", 11)
 check("no public chat → admin warned, nothing public", sent and all(c == "ADMIN" for c, *_ in sent))
 
+# ── v1.43 Flipkart lane (inside the drip job)
+tf.AFFILIATE_CHAT_ID = "@onezerodeals"
+for f in ("FK_POST_LOG.csv", "AFF_POST_LOG.csv", "AFF_POOL.csv"):
+    if os.path.exists(os.path.join(TMP, f)): os.remove(os.path.join(TMP, f))
+pd.DataFrame([
+    {"date": "2026-11-12", "item_key": "q:desk lamp", "lane": "products", "kind": "phrase", "name": "rechargeable desk lamp",
+     "sources": "gtrends,youtube", "status": "2+ sources", "trend_rise": "900"},
+    {"date": "2026-11-12", "item_key": "q:lunch box", "lane": "products", "kind": "phrase", "name": "hot lunch box",
+     "sources": "amazon_list,gtrends", "status": "2+ sources", "trend_rise": "900"},
+    {"date": "2026-11-12", "item_key": "q:rummy", "lane": "products", "kind": "phrase", "name": "rummy app",
+     "sources": "gtrends,youtube", "status": "2+ sources", "trend_rise": "900"},
+    {"date": "2026-11-12", "item_key": "q:x", "lane": "products", "kind": "phrase", "name": "single source thing",
+     "sources": "gtrends", "status": "watch", "trend_rise": "900"}]).to_csv(os.path.join(TMP, "DISCOVERY.csv"), index=False)
+cand = tf.flipkart_candidates(pd.read_csv(os.path.join(TMP, "DISCOVERY.csv"), dtype=str), set(), "2026-11-12")
+check("Flipkart candidates: 2+ sources, not already on Amazon's list, nothing banned",
+      [c["name"] for c in cand] == ["rechargeable desk lamp"], cand)
+check("off-season items held back (neck fan = summer, in November)",
+      tf.flipkart_candidates(pd.DataFrame([{"date": "2026-11-12", "lane": "products", "kind": "phrase", "name": "neck fan",
+                             "sources": "gtrends,youtube", "status": "2+ sources"}]), set(), "2026-11-12") == [])
+sent.clear(); tf.FLIPKART_AFFID = ""; tf.BR_FLIPKART_FORCE = False
+run_at("2026-11-12", 19)
+fk_pub = [m for c, _, m in sent if c == "@onezerodeals" and "shop on Flipkart" in m]
+draft = [m for c, _, m in sent if c == "ADMIN" and "Flipkart lane — DRAFT" in m]
+check("no Affiliate ID / lead test not passed → admin DRAFT only, nothing public", not fk_pub and draft and "FLIPKART_AFFID not set" in draft[0])
+check("Amazon slot still posts in the same run (separate log)", any(c == "@onezerodeals" and "Hidden Amazon Finds" in m for c, _, m in sent))
+os.remove(os.path.join(TMP, "FK_POST_LOG.csv"))
+sent.clear(); tf.FLIPKART_AFFID = "onezero123"; tf.BR_FLIPKART_FORCE = True
+tf.NOW_IST = datetime(2026, 11, 12, 21, 35, tzinfo=IST); tf.main_drip()
+fk_pub = [(t, m) for c, t, m in sent if c == "@onezerodeals" and "shop on Flipkart" in m]
+check("ID set + gate passed (forced here) → posted via the public bot with affid search link + #ad",
+      fk_pub and fk_pub[0][0] == "pubtok" and "flipkart.com/search?q=rechargeable+desk+lamp&amp;affid=onezero123" in fk_pub[0][1]
+      and "#ad" in fk_pub[0][1], fk_pub[:1])
+sent.clear(); tf.NOW_IST = datetime(2026, 11, 12, 21, 50, tzinfo=IST); tf.main_drip()
+check("Flipkart lane posts at most once a day", not any("shop on Flipkart" in m for _, _, m in sent))
+tf.FLIPKART_AFFID = ""; tf.BR_FLIPKART_FORCE = False
+
 shutil.rmtree(TMP)
 print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED"); sys.exit(1 if FAILS else 0)

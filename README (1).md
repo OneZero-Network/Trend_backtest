@@ -130,6 +130,20 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.43: Flipkart lane (rising searches confirmed by Google Trends + YouTube)
+- **What:** once a day, in the drip job (first run at or after `BR_FLIPKART_HOUR`, default 19:00 IST), up to 3 product searches from the latest **Independent discovery** run where **2+ independent sources agree**. Not already on Amazon's bestseller lists (that's the Amazon lane), in season, nothing banned, not posted in the last 7 days.
+- **Post:** "🔎 Rising Google searches · shop on Flipkart". Each item is a Flipkart **search** link (`flipkart.com/search?q=…&affid=…`), followed by an #ad line. It goes through the public bot to the same chat(s) as the Amazon picks.
+- **Gate:** it posts publicly only when the secret `FLIPKART_AFFID` is set **and** the discovery lead test has passed (≥30 items judged, ≥30% reached Amazon's lists within 14 days). Otherwise the admin chat gets a **DRAFT** with the reason. `BR_FLIPKART_FORCE=1` skips the lead test (not advised).
+- **Own log (FK_POST_LOG tab),** so it never blocks the Amazon slot's 75-minute duplicate check.
+- **Check Flipkart's affiliate terms** that search-page links with `affid` earn commission before relying on them.
+
+## v1.42: fix: focus search on Software Recommendations limited to the last 12 months (it had no date limit and counted years-old questions as current demand)
+
+## v1.41: vendor-only requests, better crowding query, AI = Developer
+- **VENDOR-ONLY:** on 10 Nov both "enough evidence" needs were feature requests on `anthropics/claude-code` (408 and 158 votes): real demand that only the product's maker can build. Requests made *only* as issues on a big vendor's own repo (Anthropic, OpenAI, Microsoft, Google, GitHub, Apple, Meta, AWS, Cursor, Vercel, JetBrains, Notion) are now VENDOR-ONLY, unless the request has an outside angle (API, CLI, plugin, extension, MCP, proxy/base URL, SDK, export, webhook, self-hosting). Score ×0.2, never shortlisted, listed on one line (🏢). If someone *outside* also asks for it as a tool (HN, Software Recs), it's not vendor-only.
+- **Web crowding** searches the readable request ("Bring back the usage stats panel…"), not word stems, so it stops matching random sites.
+- **AI and LLM words** (llm, model, prompt, agent, mcp, claude, gpt, token, inference, rag, copilot…) mark a need as **Developer**, not General.
+
 ## v1.40: evidence counts votes, builds up over 8 weeks, and searches your focus
 The first v1.39 run kept 106 real requests but found 0 needs with enough evidence. That wasn't because the filter was too strict, but because the evidence rule ignored votes, reset every week, and the searches weren't aimed at the focus niche.
 - **Votes count:** each request = 1 + extra for its votes or views (GitHub +1 per 25 👍, HN +1 per 40 points, Software Recs +1 per 1,500 views; capped at +10). A single heavily voted request (50+ 👍 issue, 100+ point HN post, 5,000+ view Software Recs question) reaches **Medium** confidence on its own.

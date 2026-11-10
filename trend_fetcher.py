@@ -35,7 +35,7 @@
 import os, re, sys, json, math, time, random, traceback, html as _html
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from discount_rule import discount_status            # shared with backtest — one rule
-import calculator, compliance, youtube_check, sourcing, picks, brief, discovery, automation
+import calculator, compliance, youtube_check, sourcing, picks, brief, discovery, automation, season
 from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree as ET
 
@@ -1686,6 +1686,91 @@ def slots_left(now_hour):
     return max(1, sum(1 for h in DRIP_SLOTS_IST if h >= now_hour))
 
 
+# ══════════════════════════════════════════════════════════════════════
+# v1.43 FLIPKART LANE — rising searches confirmed by 2+ independent sources → Flipkart search link (once a day)
+# ══════════════════════════════════════════════════════════════════════
+FLIPKART_AFFID    = os.environ.get("FLIPKART_AFFID") or ""
+BR_FLIPKART_HOUR  = int(os.environ.get("BR_FLIPKART_HOUR") or 19)     # first drip run at/after this IST hour
+BR_FLIPKART_MAX   = int(os.environ.get("BR_FLIPKART_MAX") or 3)
+BR_FLIPKART_FORCE = (os.environ.get("BR_FLIPKART_FORCE") or "") == "1"   # post before the lead test passes (not advised)
+
+
+def flipkart_link(phrase, affid):
+    from urllib.parse import quote_plus
+    return f"https://www.flipkart.com/search?q={quote_plus(str(phrase))}" + (f"&affid={affid}" if affid else "")
+
+
+def flipkart_candidates(disc, posted_recent, today):
+    """Latest discovery day: product searches where 2+ independent sources agree, NOT already on Amazon's
+    lists (that's the Amazon lane's job), in season, nothing banned, not posted in the last 7 days."""
+    if disc is None or disc.empty or "status" not in disc:
+        return []
+    d = disc[disc["date"] == disc["date"].max()]
+    lane = d.get("lane", pd.Series(["products"] * len(d), index=d.index)).fillna("products")
+    d = d[(lane == "products") & (d["status"] == "2+ sources") & (d["kind"] == "phrase")
+          & ~d["sources"].astype(str).str.contains("amazon_list")]
+    out = []
+    for _, r in d.iterrows():
+        name = str(r["name"])
+        if discovery.BANNED.search(name) or name in posted_recent:
+            continue
+        if not season.window(compliance.seasonal_flag(name), today)["affiliate_ok"]:
+            continue
+        out.append({"name": name, "sources": str(r["sources"]), "rise": r.get("trend_rise", "")})
+    return out
+
+
+def flipkart_lane(store, astore, targets, hist):
+    """Runs inside the drip job. Posts once a day (first run at/after BR_FLIPKART_HOUR) only when FLIPKART_AFFID
+    is set AND the discovery lead test has passed; otherwise sends the admin a DRAFT of what it would post."""
+    global TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN
+    if NOW_IST.hour < BR_FLIPKART_HOUR:
+        return
+    fl = astore.read("FK_POST_LOG")
+    today = NOW_IST.strftime("%Y-%m-%d")
+    if not fl.empty and (fl["posted_at"].astype(str).str[:10] == today).any():
+        return
+    cutoff = (NOW_IST - timedelta(days=7)).strftime("%Y-%m-%d")
+    recent = set(fl.loc[(fl["posted_at"].astype(str) >= cutoff) & (fl["status"] == "posted"), "name"]) if not fl.empty else set()
+    disc = store.read("DISCOVERY")
+    cands = flipkart_candidates(disc, recent, TODAY)[:BR_FLIPKART_MAX]
+    if not cands:
+        log("Flipkart lane: no rising search with 2+ sources today"); return
+    bs = hist[hist["list"] == "bestsellers"] if not hist.empty else hist
+    lt = discovery.lead_test(disc.to_dict("records"),
+                             bs[["date", "asin", "title"]].fillna("").astype(str).to_dict("records") if not bs.empty else [])
+    passed = lt["eligible"] >= discovery.GATE_LEAD_MIN and (lt["rate"] or 0) >= discovery.GATE_LEAD_RATE
+    live = bool(FLIPKART_AFFID) and (passed or BR_FLIPKART_FORCE) and bool(targets)
+    lines = ["🔎 <b>Rising Google searches</b> · shop on Flipkart", "Searches climbing this week, confirmed by more than one "
+             "source. Tap to see what's available.", ""]
+    for i, c in enumerate(cands, 1):
+        lines.append(f'{i}. <a href="{_esc(flipkart_link(c["name"], FLIPKART_AFFID))}">{_esc(c["name"])}</a>')
+    lines += ["", "<i>#ad · Flipkart affiliate links — we may earn from purchases.</i>"]
+    msg = "\n".join(lines)
+    stamp = NOW_IST.strftime("%Y-%m-%d %H:%M")
+    if live:
+        own, own_tok = TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN
+        try:
+            for _, chat, _ in targets:
+                TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN = chat, AFFILIATE_BOT_TOKEN or own_tok
+                send_telegram(msg)
+        finally:
+            TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN = own, own_tok
+        status = "posted"
+    else:
+        why = []
+        if not FLIPKART_AFFID:
+            why.append("FLIPKART_AFFID not set")
+        if not passed and not BR_FLIPKART_FORCE:
+            why.append(f"lead test not passed yet ({lt['appeared']}/{lt['eligible']} judged; need ≥{discovery.GATE_LEAD_MIN} and "
+                       f"≥{discovery.GATE_LEAD_RATE:.0%})")
+        send_telegram("🔒 <b>Flipkart lane — DRAFT, not posted</b> (" + _esc("; ".join(why) or "no public chat") + ")\n\n" + msg)
+        status = "draft"
+    rows = pd.DataFrame([{"posted_at": stamp, "name": c["name"], "sources": c["sources"], "status": status,
+                          "link": flipkart_link(c["name"], FLIPKART_AFFID)} for c in cands]).astype(str)
+    astore.write("FK_POST_LOG", pd.concat([fl, rows], ignore_index=True) if not fl.empty else rows)
+
+
 def main_drip():
     """Runs every 2 h (9 am–9 pm IST). Builds today's pool on first run, then posts the next 1–2 picks."""
     global TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN
@@ -1700,6 +1785,10 @@ def main_drip():
         log("Drip: not enough history yet"); return
     hist["rank"] = pd.to_numeric(hist["rank"], errors="coerce")
     last = hist["date"].max()
+    try:
+        flipkart_lane(store, astore, targets, hist)        # own log — never blocks the Amazon slot
+    except Exception as exc:
+        log_tb("Flipkart lane", exc)
     pool = astore.read("AFF_POOL")
     today_pool = pool[pool["date"] == last] if not pool.empty else pool
     if today_pool.empty:
@@ -2171,7 +2260,8 @@ def auto_focus(focus_words):
                 out.append({"source": "github_issue", "text": title, "url": it.get("html_url"),
                             "weight": int((it.get("reactions") or {}).get("+1", 0)) + int(it.get("comments") or 0)})
         time.sleep(2.5 if GITHUB_API_TOKEN else 7)
-        p = {"order": "desc", "sort": "relevance", "q": word, "site": "softwarerecs", "pagesize": 30}
+        p = {"order": "desc", "sort": "relevance", "q": word, "site": "softwarerecs", "pagesize": 30,
+             "fromdate": int((datetime.now(timezone.utc) - timedelta(days=365)).timestamp())}   # old asks aren't current demand
         if STACKEXCHANGE_KEY:
             p["key"] = STACKEXCHANGE_KEY
         j = _get_json("https://api.stackexchange.com/2.3/search/advanced", p)
@@ -2214,11 +2304,19 @@ def main_automation():
     old = store.read("OPPORTUNITIES")
     hist = old[old["week"] != week].to_dict("records") if not old.empty else []
     rows = automation.open_rows_v2(groups[:BR_AUTO_SUPPLY_CHECKS], supply, extra, week, hist, focus=BR_AUTO_FOCUS)
-    web = auto_web(queries)
+    webq = {" ".join(sorted(g["core"][:3])): automation.display_name(g)[:80] for g in groups[:BR_AUTO_SUPPLY_CHECKS]}
+    web = auto_web(webq)
     rows = automation.finalize_v38(rows, {}, web, BR_AUTO_FOCUS_WORDS)
     names = {" ".join(sorted(g["core"][:3])): automation.display_name(g) for g in groups[:BR_AUTO_SUPPLY_CHECKS]}
+    vend = {" ".join(sorted(g["core"][:3])): automation.vendor_only(g) for g in groups[:BR_AUTO_SUPPLY_CHECKS]}
     for r in rows:
         r["name"] = names.get(r["bucket"]) or names.get(" ".join(sorted(r["problem"].split()[:3]))) or r["problem"]
+        k3 = " ".join(sorted(r["problem"].split()[:3]))
+        if vend.get(r["bucket"]) or vend.get(k3):
+            r["gap"], r["status"] = "VENDOR-ONLY", "watch"
+            r["score"] = round(float(r["score"]) * 0.2, 1)
+            r["score_parts"] += " ×0.2 vendor-only (only the product's maker can build it)"
+    rows.sort(key=lambda r: (not r["fits_focus"], r["gap"] == "VENDOR-ONLY", -float(r["score"])))
     new = pd.DataFrame(rows).astype(str)
     keep = old[old["week"] != week] if not old.empty else old
     store.write("OPPORTUNITIES", pd.concat([keep, new], ignore_index=True) if not keep.empty else new)
@@ -2232,13 +2330,14 @@ def main_automation():
     by_src = {}
     for it in items:
         by_src[it["source"]] = by_src.get(it["source"], 0) + 1
-    L = [f"🛠 <b>What people want built</b> — week of {week} · v1.40 (admin only · for bizopstool)",
+    L = [f"🛠 <b>What people want built</b> — week of {week} · v1.42 (admin only · for bizopstool)",
          "Requests read: " + " · ".join(f"{k} {v}" for k, v in sorted(by_src.items())) + f" → {len(groups)} distinct needs"
          + (f" · focus words: {', '.join(BR_AUTO_FOCUS_WORDS)}" if BR_AUTO_FOCUS_WORDS else " · ⚠️ no focus words set (BR_AUTO_FOCUS_WORDS)")
          + ("" if BRAVE_API_KEY else " · web crowding: not checked (no BRAVE_API_KEY)")]
     infocus = [r for r in rows if r["fits_focus"]]
     parked = [r for r in rows if not r["fits_focus"]]
-    strong = [r for r in infocus if r["confidence"] in ("Medium", "High")]
+    strong = [r for r in infocus if r["confidence"] in ("Medium", "High") and r["gap"] != "VENDOR-ONLY"]
+    vendor = [r for r in infocus if r["gap"] == "VENDOR-ONLY"]
     weak = [r for r in infocus if r["confidence"] == "Low"]
     L.append(f"Real tool requests: {new_n} new of {raw_n} items · {len(items)} in the {automation.WINDOW_WEEKS}-week memory · "
              f"{len(strong)} needs with enough evidence")
@@ -2263,12 +2362,15 @@ def main_automation():
             L.append("   asks: " + " ".join(f'<a href="{_esc(u)}">[{n + 1}]</a>' for n, u in enumerate(str(r["links"]).split()[:3])))
         if r["reusable_code"]:
             L.append(f"   ♻️ {_esc(r['reusable_code'][:110])}")
+    if vendor:
+        L.append("\n🏢 <i>Vendor-only (real demand, but only the product's maker can build it):</i> "
+                 + _esc(" · ".join(f"{r['name'][:45]} ({r.get('votes', 0)} votes)" for r in vendor[:4])))
     if weak:
         L.append("\n<i>Single signals (not evidence yet — watch only):</i> "
                  + _esc(" · ".join(r["name"][:45] for r in weak[:6])))
     if parked:
         L.append("\n🅿️ <b>Parked (off focus)</b>: " + _esc(" · ".join(r["name"][:40] for r in parked[:8])))
-    L.append("\nBUILD = nothing exists · PACKAGE = exists, not easy · CROWDED · HARD = platform access · "
+    L.append("\nBUILD = nothing exists · PACKAGE = exists, not easy · CROWDED · HARD = platform access · VENDOR-ONLY = in-app change only the maker can do · "
              "UNPROVEN = too little evidence (needs 4+ asks from 2+ sources) · ⭐ = 3 wk + 2 sources + Medium confidence + in focus")
     if verdicts:
         L.append("\n<b>Demand tests</b> (rate among people shown directly — not traffic)")
@@ -2348,7 +2450,7 @@ def main():
             log(f"Backup schedule: today's data ({TODAY}) already fetched — skipping (avoids extra Amazon requests)")
             return
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.40 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.43 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -2485,7 +2587,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.40 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.43 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if "signals" in locals() and not signals.empty and "stock_gate" in signals:
         sg = signals["stock_gate"].astype(str)

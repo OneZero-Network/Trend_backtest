@@ -94,7 +94,7 @@ NOT_APP = re.compile(r"\b(login|sign in|customer care|contact|helpline|not worki
                      r"card|ration|voter|epfo|upi|recharge|bill pay)\b", re.I)
 
 LANES = {
-    "products": {"seeds": PRODUCT_SEEDS, "strip": SHOP_WORDS, "block": NOT_PRODUCT, "key": "q", "yt_suffix": None},
+    "products": {"seeds": PRODUCT_SEEDS, "strip": SHOP_WORDS, "block": NOT_PRODUCT, "key": "q", "yt_suffix": "review"},
     "skills":   {"seeds": SKILL_SEEDS, "strip": SKILL_WORDS, "block": NOT_SKILL, "key": "sk", "yt_suffix": "tutorial"},
     "apps":     {"seeds": APP_SEEDS, "strip": APP_WORDS, "block": NOT_APP, "key": "ap", "yt_suffix": "review"},
 }
@@ -379,12 +379,13 @@ def combine(trend_rows, yt_rows, amazon_titles_today, history_rows, today, yt_ph
         if r["creators"] >= MIN_CREATORS and r["kind"] != "phrase":
             src.add("youtube")
         toks = set() if str(r["name"]).startswith("(unnamed") else _tokens(r["name"])
-        if r["kind"] == "phrase" and r["lane"] != "products" and r["creators"] >= MIN_CREATORS:
+        if r["kind"] == "phrase" and r["creators"] >= MIN_CREATORS:
             src.add("youtube")                                  # recent tutorials/reviews from 3+ channels
         if r["kind"] == "phrase" and r["lane"] == "products" and len(toks) >= 1:
             if any(toks <= yt for o, yt in yt_named if o["creators"] >= MIN_CREATORS):
                 src.add("youtube")
-        if r["lane"] == "products" and toks and len(toks) >= (1 if r["kind"] == "phrase" else 2):
+        # a ONE-word search ("toys", "organizer") matches some Amazon title by chance → never counts as agreement
+        if r["lane"] == "products" and toks and len(toks) >= 2:
             need = toks if r["kind"] == "phrase" else set(list(toks)[:3])
             if any(need <= a for a, _ in amz):
                 src.add("amazon_list")
@@ -422,16 +423,22 @@ def lead_test(disc_rows, bestseller_rows, window=14):
         later = [d for d in days if d > d0 and (datetime.fromisoformat(d) - datetime.fromisoformat(d0)).days <= window]
         if not later or (datetime.fromisoformat(days[-1]) - datetime.fromisoformat(d0)).days < window:
             continue                                       # window not over yet
+        toks = set() if str(r["name"]).startswith("(unnamed") else _tokens(r["name"])
+        if r["kind"] == "phrase" and len(toks) < 2:
+            continue                                       # one-word phrases match Amazon titles by chance
+        def _match(day):
+            return any((r["kind"] == "amazon" and asin == r["product_id"]) or
+                       (r["kind"] == "phrase" and toks and toks <= t) for asin, t in by_day[day])
+        # "Found BEFORE Amazon ranked it" must be true: skip anything already on the lists in the 14 days
+        # before (or on) the discovery date — otherwise a product that was there all along counts as a "lead".
+        prior = [d for d in days if d <= d0 and (datetime.fromisoformat(d0) - datetime.fromisoformat(d)).days <= window]
+        if any(_match(d) for d in prior):
+            continue
         eligible += 1
-        toks = _tokens(r["name"])
         hit = None
         for d in later:
-            for asin, t in by_day[d]:
-                if (r["kind"] == "amazon" and asin == r["product_id"]) or \
-                   (r["kind"] == "phrase" and toks and toks <= t):
-                    hit = d; break
-            if hit:
-                break
+            if _match(d):
+                hit = d; break
         if hit:
             appeared += 1
             leads.append((datetime.fromisoformat(hit) - datetime.fromisoformat(d0)).days)

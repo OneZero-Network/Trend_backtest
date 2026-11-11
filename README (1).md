@@ -130,6 +130,24 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.45: full audit fixes (storage safety, fair pick test, honest lead test)
+- **Storage could wipe a tab.** Saving used to clear the sheet and then write; a failed write (Google returns errors now and then) left the tab empty, including HISTORY. Now it writes first and trims leftovers after, retries failed reads and writes 3 times, and **refuses to overwrite a protected tab with less than half its rows** (HISTORY, PICKS, DETAIL_HISTORY, GTRENDS_HISTORY, YT_HISTORY, SOURCING_HISTORY, DISCOVERY, AFF_POST_LOG, ASKS, OPPORTUNITIES), alerting the admin chat instead.
+- **The pick test was unfair in two directions.**
+  - Baselines could be sold-out products (which drop off the list fast), flattering the picks. Baselines must now have a price, like picks.
+  - "Rank no worse than on pick day" penalises picks, which are chosen just after a jump. A second measure, **still in the top 100** (`alive_d7/14/28`), is now tracked beside it.
+  - Daily picks share one market wave, so 40 picks from 4 days isn't 40 independent results. The verdict now needs **10 different pick days** and reports **days won** ("picks beat random on 9 of 12 days"). "Beat random" requires winning at least 60% of days. The verdict line appears in the daily digest (🧪).
+- **One-day entrants are no longer picked.** 7–15 products enter each category's top 100 daily and most leave again. A pick must have been listed on 3+ of the last 14 days, or have entered in the top 30.
+- **The discovery lead test could pass by chance.** One-word searches ("toys") match some Amazon title any day. Now: phrases need 2+ words; an item counts only if it was absent from Amazon's lists for the 14 days **before** discovery; one-word searches never count as "Amazon agrees".
+- **Product searches get a YouTube check** ("<phrase> review" videos from 3+ channels with real views, top 4 phrases a day), so the Flipkart lane's 2-source rule can actually be met. Before, it depended on creators linking the same product, which found 0 in live runs.
+- **Schedules:** the daily fetch has a concurrency group, so the backup run waits for the Worker's run instead of fetching Amazon twice at once.
+- **Alerts:** if there's no fresh Amazon data by 11:00–12:00 IST, the admin chat is told that posts are paused. "No eligible picks" is sent once in the morning, not every 2 hours.
+- **Festivals added:** Makar Sankranti/Lohri/Pongal (kites, 14 Jan 2027), Republic/Independence Day (flags), Mother's/Father's Day.
+
+**Known limits (not fixed, by design or not fixable here):** see the audit notes in the chat of 11 Nov 2026: customer-return losses aren't in the calculator; pincode delivery can't be checked; scraped Amazon data shouldn't be resold; affiliate income stays small until the audience is large.
+
+## v1.44: Flipkart lane works through an affiliate network
+Direct Flipkart sign-ups are paused at times. Set the secret `FLIPKART_LINK_TEMPLATE` to your network's deep-link format, with `{url}` where the Flipkart address goes (copy it from the network's link or deep-link tool; it's different for every network and account). The engine URL-encodes the Flipkart search address into it. Either `FLIPKART_AFFID` (direct) or `FLIPKART_LINK_TEMPLATE` (network) enables the lane. The lead-test gate still applies. Check that the network's Flipkart campaign is active and allows Telegram traffic.
+
 ## v1.43: Flipkart lane (rising searches confirmed by Google Trends + YouTube)
 - **What:** once a day, in the drip job (first run at or after `BR_FLIPKART_HOUR`, default 19:00 IST), up to 3 product searches from the latest **Independent discovery** run where **2+ independent sources agree**. Not already on Amazon's bestseller lists (that's the Amazon lane), in season, nothing banned, not posted in the last 7 days.
 - **Post:** "🔎 Rising Google searches · shop on Flipkart". Each item is a Flipkart **search** link (`flipkart.com/search?q=…&affid=…`), followed by an #ad line. It goes through the public bot to the same chat(s) as the Amazon picks.

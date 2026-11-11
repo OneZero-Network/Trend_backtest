@@ -24,6 +24,9 @@ FESTIVALS = {
     "Navratri/Durga Puja": ["2027-09-30"],
     "Karwa Chauth":        ["2027-10-18"],
     "Chhath":              ["2026-11-15", "2027-11-04"],   # publicholidays.in
+    "Makar Sankranti/Lohri/Pongal": ["2027-01-14"],
+    "Republic/Independence Day":    ["2027-01-26", "2027-08-15"],
+    "Mother's/Father's Day":        ["2027-05-09", "2027-06-20"],
 }
 SEASONS = {"Monsoon": (6, 9), "Summer": (3, 6), "Winter": (11, 2)}   # (first month, last month)
 

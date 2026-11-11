@@ -28,6 +28,7 @@ def affiliate_link(asin, tag):
     return f"https://www.amazon.in/dp/{asin}" + (f"?tag={tag}" if tag else "")
 
 
+MIN_DAYS_ON_LIST = 3      # one-day entrants at the tail of the list are churn, not trends
 MIN_RANK_GAIN = 10        # a pick must have actually climbed ≥10 places (week 1: a product that FELL was picked)
 
 
@@ -48,6 +49,12 @@ def select_picks(signals, n=8, max_per_cat=MAX_PER_CATEGORY, today=None, rejecte
     if "rank_change" in s:
         rc = pd.to_numeric(s["rank_change"], errors="coerce")
         s = s[rc >= MIN_RANK_GAIN]
+    if "days_on_list_14d" in s and "bs_rank_today" in s:
+        # 7–15 products enter each category's top 100 every day and most are gone the next (tail churn).
+        # A climber counts only if it has been on the lists 3+ of the last 14 days, or entered high (top 30).
+        days = pd.to_numeric(s["days_on_list_14d"], errors="coerce").fillna(0)
+        rk = pd.to_numeric(s["bs_rank_today"], errors="coerce").fillna(999)
+        s = s[(days >= MIN_DAYS_ON_LIST) | (rk <= 30)]
     if "price_inr" in s:
         # Amazon keeps ranking sold-out items for days (from past sales) but shows NO price for them.
         # 9 Nov: 5 of 8 posted picks were unavailable — every one had no price on that day's list.
@@ -100,7 +107,10 @@ def make_rows(picks, hist, today, seed=None):
         r0 = ranks.get((p["asin"], today))
         rows.append({"pick_date": today, "role": "pick", "asin": p["asin"], "category_slug": cat,
                      "title": str(p["title"])[:120], "trend_score": p.get("trend_score"), "rank_at_pick": r0})
-        pool = sorted(set(bs.loc[bs["category_slug"] == cat, "asin"]) - chosen)
+        # Baselines must be in stock too (a price on today's list). Picks are; sold-out items drop off the
+        # list fast, so unfiltered baselines made picks look better than they are.
+        inst = bs[pd.to_numeric(bs["price_inr"], errors="coerce").fillna(0) > 0] if "price_inr" in bs else bs
+        pool = sorted(set(inst.loc[inst["category_slug"] == cat, "asin"]) - chosen)
         for b in rng.sample(pool, min(BASELINE_PER_PICK, len(pool))):
             chosen.add(b)
             rows.append({"pick_date": today, "role": "baseline", "asin": b, "category_slug": cat,
@@ -126,7 +136,27 @@ def update_tracking(tracker, hist):
             rk.append(now if now is not None else "out")
             hit.append(int(now is not None and pd.notna(r0) and now <= r0))
         t[f"rank_d{h}"], t[f"hit_d{h}"] = rk, hit
+        # second, fairer measure: still in the top 100 at all (picks were chosen right after a jump, so
+        # "rank ≤ rank at pick" is biased against them by regression to the mean)
+        t[f"alive_d{h}"] = ["" if str(x) == "" or (isinstance(x, float) and pd.isna(x)) else int(str(x) != "out") for x in rk]
     return t
+
+
+def daily_wins(tracker, h=14, col="hit"):
+    """Per pick date: did picks beat that day's baselines? → (days picks won, days compared).
+    Picks made on the same day share one market wave, so days — not picks — are the independent units."""
+    c = f"{col}_d{h}"
+    if c not in tracker:
+        return 0, 0
+    d = tracker[pd.to_numeric(tracker[c], errors="coerce").notna()].copy()
+    d[c] = pd.to_numeric(d[c])
+    won = n = 0
+    for _, g in d.groupby("pick_date"):
+        p, b = g.loc[g["role"] == "pick", c], g.loc[g["role"] == "baseline", c]
+        if len(p) and len(b):
+            n += 1
+            won += int(p.mean() > b.mean())
+    return won, n
 
 
 def scorecard(tracker):
@@ -146,8 +176,30 @@ def scorecard(tracker):
     return sc
 
 
-def verdict(sc, min_resolved=40):
-    """Plain-language reading of the scorecard (no p-hacking: one horizon, decided in advance = 14d)."""
+MIN_PICK_DAYS = 10        # distinct pick dates needed before any verdict (one week = one market wave)
+
+
+def verdict(sc, min_resolved=40, tracker=None):
+    """Plain-language reading of the scorecard (no p-hacking: one horizon, decided in advance = 14d).
+    With `tracker`, also requires ≥ MIN_PICK_DAYS distinct pick dates and reports days won + survival."""
+    if tracker is not None and not tracker.empty and "hit_d14" in tracker:
+        won, n = daily_wins(tracker, 14, "hit")
+        if 0 < n < MIN_PICK_DAYS or n == 0:
+            base = _verdict_core(sc, min_resolved)
+            return (f"Forward test (14d): results from {n} pick day(s) so far — needs {MIN_PICK_DAYS} different days "
+                    f"before judging (daily picks share the same market wave). " + ("" if n == 0 else f"So far: {base.split(': ', 1)[-1]}"))
+        aw, an = daily_wins(tracker, 14, "alive")
+        core = _verdict_core(sc, min_resolved)
+        extra = f" Picks beat random on {won} of {n} days"
+        if an:
+            extra += f"; still in the top 100 after 14 days: better than random on {aw} of {an} days"
+        if "beat random" in core and won < 0.6 * n:
+            core = core.replace("picks beat random", "ahead overall, but NOT consistently by day — not proven")
+        return core + extra + "."
+    return _verdict_core(sc, min_resolved)
+
+
+def _verdict_core(sc, min_resolved=40):
     d = sc[sc["horizon_days"] == 14]
     if d.empty:
         return "Forward test: no 14-day results yet."

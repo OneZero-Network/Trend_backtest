@@ -1142,9 +1142,31 @@ def _sheet_fix_hint(exc, email):
     return f"Google Sheets error: {type(exc).__name__}: {msg[:200]}"
 
 
+PICK_LINE = []          # forward-test verdict for the daily digest
+
+PROTECTED_TABS = {"HISTORY", "PICKS", "DETAIL_HISTORY", "GTRENDS_HISTORY", "YT_HISTORY", "SOURCING_HISTORY",
+                  "DISCOVERY", "AFF_POST_LOG", "ASKS", "OPPORTUNITIES"}
+
+
+def _retry(fn, what, tries=4, fatal=()):
+    """Google Sheets calls fail transiently (429 / 5xx). Retry with backoff; re-raise `fatal` types at once."""
+    for k in range(tries):
+        try:
+            return fn()
+        except fatal:
+            raise
+        except Exception as exc:
+            if k == tries - 1:
+                raise
+            wait = 8 * (k + 1)
+            log(f"  Sheets {what}: {type(exc).__name__} — retry {k + 1}/{tries - 1} in {wait}s", "WARN")
+            time.sleep(wait)
+
+
 class Store:
     def __init__(self, sheet_id=None, local_dir=None):
         self.wb = None
+        self._rows_seen = {}
         self.local_dir = local_dir or LOCAL_OUT_DIR
         sheet_id = sheet_id or GOOGLE_SHEET_ID
         if GOOGLE_CREDS_JSON and sheet_id:
@@ -1176,9 +1198,11 @@ class Store:
             return pd.read_csv(p, dtype=str) if os.path.exists(p) else pd.DataFrame()
         import gspread
         try:
-            vals = self.wb.worksheet(tab).get_all_values()
+            vals = _retry(lambda: self.wb.worksheet(tab).get_all_values(), f"read {tab}",
+                          fatal=(gspread.WorksheetNotFound,))
         except gspread.WorksheetNotFound:
             return pd.DataFrame()
+        self._rows_seen[tab] = max(0, len(vals) - 1)
         df = pd.DataFrame(vals[1:], columns=vals[0]) if len(vals) > 1 else pd.DataFrame()
         if "asin" in df:
             df["asin"] = df["asin"].map(norm_asin)
@@ -1198,12 +1222,42 @@ class Store:
             return len(df)
         import gspread
         try:
-            ws = self.wb.worksheet(tab)
+            ws = _retry(lambda: self.wb.worksheet(tab), f"open {tab}", fatal=(gspread.WorksheetNotFound,))
         except gspread.WorksheetNotFound:
             ws = self.wb.add_worksheet(title=tab, rows=len(df) + 10, cols=len(df.columns) + 2)
-        ws.clear()
+        # Shrink protection: the tabs that can't be rebuilt must never lose most of their rows in one write
+        # (a bad read or a bug upstream would otherwise silently erase weeks of history).
+        if tab in PROTECTED_TABS:
+            before = self._rows_seen.get(tab)
+            if before is None:
+                try:
+                    before = max(0, len(ws.col_values(1)) - 1)
+                except Exception:
+                    before = 0
+            if before >= 50 and len(df) < before * 0.5:
+                msg = (f"⛔ Refused to overwrite {tab}: it has {before} rows and the new data has only {len(df)}. "
+                       f"Nothing was changed. This protects your history — send the run log.")
+                log(msg, "ERR")
+                try:
+                    send_telegram(_esc(msg))
+                except Exception:
+                    pass
+                return 0
         values = [df.columns.tolist()] + df.astype(object).where(df.notna(), "").astype(str).values.tolist()
-        ws.update(range_name="A1", values=values, value_input_option="RAW")   # RAW: keeps 0008640378 as text
+        # Write FIRST, trim leftovers AFTER. (Old order was clear → write: a failed write left the tab empty.)
+        need_r, need_c = len(values) + 5, len(df.columns) + 1
+        if ws.row_count < need_r or ws.col_count < need_c:
+            _retry(lambda: ws.resize(rows=max(ws.row_count, need_r), cols=max(ws.col_count, need_c)), f"resize {tab}")
+        _retry(lambda: ws.update(range_name="A1", values=values, value_input_option="RAW"), f"write {tab}")  # RAW keeps 0008640378 as text
+        try:
+            old_r, old_c = ws.row_count, ws.col_count
+            if old_r > len(values):
+                ws.batch_clear([f"A{len(values) + 1}:{gspread.utils.rowcol_to_a1(old_r, max(old_c, need_c))}"])
+            if old_c > len(df.columns):
+                ws.batch_clear([f"{gspread.utils.rowcol_to_a1(1, len(df.columns) + 1)}:{gspread.utils.rowcol_to_a1(len(values), old_c)}"])
+        except Exception as exc:
+            log(f"  {tab}: written, but clearing old leftover cells failed ({type(exc).__name__}) — will retry next run", "WARN")
+        self._rows_seen[tab] = len(df)
         return len(df)
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1301,8 +1355,9 @@ def main_affiliate():
         rows = picks.make_rows(chosen, hist, last)
         trk = pd.concat([trk, rows.astype(str)], ignore_index=True) if not trk.empty else rows
         store.write("PICKS", trk)
-    sc = picks.scorecard(picks.update_tracking(trk, hist)) if not trk.empty else pd.DataFrame()
-    line = picks.verdict(sc) if not sc.empty else ""
+    _trk_u = picks.update_tracking(trk, hist) if not trk.empty else trk
+    sc = picks.scorecard(_trk_u) if not trk.empty else pd.DataFrame()
+    line = picks.verdict(sc, tracker=_trk_u) if not sc.empty else ""
     msgs = picks.post_messages(chosen, hist, AFFILIATE_TAG, last, cat_names=CATEGORIES,
                                week_label=f"week of {last}")
     store.write("AFFILIATE_POST", pd.DataFrame({"message": msgs}))
@@ -1412,8 +1467,9 @@ def _affiliate_groups(store, hist, sig, last):
         rows = picks.make_rows(chosen, hist, last)       # one forward test across all groups
         trk = pd.concat([trk, rows.astype(str)], ignore_index=True) if not trk.empty else rows
         store.write("PICKS", trk)
-    sc = picks.scorecard(picks.update_tracking(trk, hist)) if not trk.empty else pd.DataFrame()
-    line = picks.verdict(sc) if not sc.empty else ""
+    _trk_u = picks.update_tracking(trk, hist) if not trk.empty else trk
+    sc = picks.scorecard(_trk_u) if not trk.empty else pd.DataFrame()
+    line = picks.verdict(sc, tracker=_trk_u) if not sc.empty else ""
     report, saved = [], []
     for g, ch in per_group:
         if ch.empty:
@@ -1471,7 +1527,7 @@ def main_brief():
     line, weeks = "", 0
     if not trk.empty:
         trk = picks.update_tracking(trk, hist)
-        line = picks.verdict(picks.scorecard(trk))
+        line = picks.verdict(picks.scorecard(trk), tracker=trk)
         weeks = trk["pick_date"].nunique()
     disc = store.read("DISCOVERY")
     early = []
@@ -1656,7 +1712,8 @@ def build_pool(store, astore, hist, sig, last, targets):
     _report_rejected(rejected)
     pool = pd.DataFrame(rows)
     if pool.empty:
-        send_telegram(f"🗓 No eligible picks for today's post pool ({last}).")
+        if NOW_IST.hour <= min(DRIP_SLOTS_IST) + 1:            # say it once in the morning, not every 2 hours
+            send_telegram(f"🗓 No eligible picks for today's post pool ({last}).")
         return pool
     trk = store.read("PICKS")
     if trk.empty or not (trk["pick_date"] == last).any():
@@ -1690,14 +1747,23 @@ def slots_left(now_hour):
 # v1.43 FLIPKART LANE — rising searches confirmed by 2+ independent sources → Flipkart search link (once a day)
 # ══════════════════════════════════════════════════════════════════════
 FLIPKART_AFFID    = os.environ.get("FLIPKART_AFFID") or ""
+# Affiliate NETWORK (Cuelinks, EarnKaro, …) instead of a direct Flipkart ID: paste the network's deep-link format
+# with {url} where the Flipkart address goes, e.g.  https://<network-redirect>/?<your-id-param>=12345&url={url}
+FLIPKART_LINK_TEMPLATE = os.environ.get("FLIPKART_LINK_TEMPLATE") or ""
 BR_FLIPKART_HOUR  = int(os.environ.get("BR_FLIPKART_HOUR") or 19)     # first drip run at/after this IST hour
 BR_FLIPKART_MAX   = int(os.environ.get("BR_FLIPKART_MAX") or 3)
 BR_FLIPKART_FORCE = (os.environ.get("BR_FLIPKART_FORCE") or "") == "1"   # post before the lead test passes (not advised)
 
 
-def flipkart_link(phrase, affid):
-    from urllib.parse import quote_plus
-    return f"https://www.flipkart.com/search?q={quote_plus(str(phrase))}" + (f"&affid={affid}" if affid else "")
+def flipkart_link(phrase, affid, template=None):
+    """Direct programme: flipkart.com/search?q=…&affid=ID. Network: the search address URL-encoded into the
+    network's deep-link template ({url} placeholder)."""
+    from urllib.parse import quote_plus, quote
+    template = FLIPKART_LINK_TEMPLATE if template is None else template
+    base = f"https://www.flipkart.com/search?q={quote_plus(str(phrase))}"
+    if template and "{url}" in template:
+        return template.replace("{url}", quote(base, safe=""))
+    return base + (f"&affid={affid}" if affid else "")
 
 
 def flipkart_candidates(disc, posted_recent, today):
@@ -1740,7 +1806,8 @@ def flipkart_lane(store, astore, targets, hist):
     lt = discovery.lead_test(disc.to_dict("records"),
                              bs[["date", "asin", "title"]].fillna("").astype(str).to_dict("records") if not bs.empty else [])
     passed = lt["eligible"] >= discovery.GATE_LEAD_MIN and (lt["rate"] or 0) >= discovery.GATE_LEAD_RATE
-    live = bool(FLIPKART_AFFID) and (passed or BR_FLIPKART_FORCE) and bool(targets)
+    has_link = bool(FLIPKART_AFFID) or "{url}" in FLIPKART_LINK_TEMPLATE
+    live = has_link and (passed or BR_FLIPKART_FORCE) and bool(targets)
     lines = ["🔎 <b>Rising Google searches</b> · shop on Flipkart", "Searches climbing this week, confirmed by more than one "
              "source. Tap to see what's available.", ""]
     for i, c in enumerate(cands, 1):
@@ -1759,8 +1826,8 @@ def flipkart_lane(store, astore, targets, hist):
         status = "posted"
     else:
         why = []
-        if not FLIPKART_AFFID:
-            why.append("FLIPKART_AFFID not set")
+        if not has_link:
+            why.append("FLIPKART_AFFID not set (or FLIPKART_LINK_TEMPLATE for a network)")
         if not passed and not BR_FLIPKART_FORCE:
             why.append(f"lead test not passed yet ({lt['appeared']}/{lt['eligible']} judged; need ≥{discovery.GATE_LEAD_MIN} and "
                        f"≥{discovery.GATE_LEAD_RATE:.0%})")
@@ -1785,6 +1852,10 @@ def main_drip():
         log("Drip: not enough history yet"); return
     hist["rank"] = pd.to_numeric(hist["rank"], errors="coerce")
     last = hist["date"].max()
+    if str(last) < TODAY and NOW_IST.hour in (11, 12):         # daily fetch + its backup should both be done by now
+        send_telegram(f"⚠️ <b>No fresh data today.</b> The latest Amazon data is from {last}, so today's posts are "
+                      f"paused (yesterday's pool is already used). Check the 'India E-commerce Trend Fetcher' run in "
+                      f"GitHub Actions.")
     try:
         flipkart_lane(store, astore, targets, hist)        # own log — never blocks the Amazon slot
     except Exception as exc:
@@ -1951,7 +2022,7 @@ def disc_yt_phrases(trows, old_rows):
     seen_before = {(str(r.get("lane")), r.get("name")) for r in old_rows}
     after = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
     out = {}
-    for lane in ("skills", "apps"):
+    for lane in ("products", "skills", "apps"):
         cands = sorted({(r["phrase"], r["rise"]) for r in trows if r.get("lane") == lane},
                        key=lambda x: (-((lane, x[0]) in seen_before), -x[1]))[:BR_DISC_YT_PHRASES]
         vids_by = {}
@@ -2450,7 +2521,7 @@ def main():
             log(f"Backup schedule: today's data ({TODAY}) already fetched — skipping (avoids extra Amazon requests)")
             return
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.43 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.45 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
@@ -2484,7 +2555,9 @@ def main():
             if not trk.empty:
                 trk = picks.update_tracking(trk, hist)
                 written["PICKS"] = store.write("PICKS", trk)
-                written["PICK_SCORECARD"] = store.write("PICK_SCORECARD", picks.scorecard(trk))
+                _sc = picks.scorecard(trk)
+                written["PICK_SCORECARD"] = store.write("PICK_SCORECARD", _sc)
+                PICK_LINE.append(picks.verdict(_sc, tracker=trk))
         except Exception as exc:
             log_tb("pick tracking", exc)
         signals = compute_signals(hist, frames)
@@ -2587,7 +2660,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.43 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v1.45 — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if "signals" in locals() and not signals.empty and "stock_gate" in signals:
         sg = signals["stock_gate"].astype(str)
@@ -2611,6 +2684,8 @@ def main():
                 for a in pready[:5]:
                     line += f"\n  • {_esc(tmap.get(a, a)[:60])}"
         lines.append(line)
+    if PICK_LINE:
+        lines.append("🧪 " + _esc(PICK_LINE[-1]))
     if BAD_CATEGORIES:
         lines.append(f"⚠️ <b>Ignored in BR_CATEGORIES:</b> {_esc(', '.join(BAD_CATEGORIES))} — these are search words, "
                      f"not Amazon category slugs. Move them to <b>BR_SEED_KEYWORDS</b>.")

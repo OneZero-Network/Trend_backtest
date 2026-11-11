@@ -119,6 +119,11 @@ check("ID set + gate passed (forced here) → posted via the public bot with aff
 sent.clear(); tf.NOW_IST = datetime(2026, 11, 12, 21, 50, tzinfo=IST); tf.main_drip()
 check("Flipkart lane posts at most once a day", not any("shop on Flipkart" in m for _, _, m in sent))
 tf.FLIPKART_AFFID = ""; tf.BR_FLIPKART_FORCE = False
+lk = tf.flipkart_link("desk lamp", "", template="https://net.example/r?pub=777&url={url}")
+check("network template wraps the URL-encoded Flipkart search address",
+      lk == "https://net.example/r?pub=777&url=https%3A%2F%2Fwww.flipkart.com%2Fsearch%3Fq%3Ddesk%2Blamp", lk)
+check("direct ID still works when no template", tf.flipkart_link("desk lamp", "abc", template="")
+      == "https://www.flipkart.com/search?q=desk+lamp&affid=abc")
 
 shutil.rmtree(TMP)
 print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED"); sys.exit(1 if FAILS else 0)

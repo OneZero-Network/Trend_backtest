@@ -98,6 +98,9 @@ SEASONAL = [
     ("Eid", r"\b(eid|ramadan|ramzan)\b"),
     ("Karwa Chauth", r"\b(karwa chauth|karva chauth)\b"),
     ("Chhath", r"\b(chhath|chhat puja|soop|supli|daura)\b"),
+    ("Makar Sankranti/Lohri/Pongal", r"\b(kite|kites|patang|manjha|manja|charkhi|firki|sankranti|lohri|pongal|uttarayan)\b"),
+    ("Republic/Independence Day", r"\b(tiranga|tricolou?r|national flag|indian flag|independence day|republic day)\b"),
+    ("Mother's/Father's Day", r"\b(mother'?s day|father'?s day)\b"),
     ("Valentine's", r"\b(valentine)\b"),
     # decor that peaks for Diwali / Christmas / weddings even when the title names no festival
     ("Festive decor", r"\b((string|fairy|curtain|pixel|rope|waterfall|serial|diwali|ladi|jhalar)\s+lights?|toran|bandhanwar|"

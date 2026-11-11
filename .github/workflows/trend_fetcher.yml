@@ -15,6 +15,12 @@ on:
 permissions:
   contents: write          # to push the daily archive to the data-archive branch
 
+# The Cloudflare Worker starts this at 07:45 IST and GitHub's backup schedule at 08:30. If the first run is
+# still going, the backup WAITS for it (never two Amazon fetches at once), then exits because data is in.
+concurrency:
+  group: daily-fetch
+  cancel-in-progress: false
+
 jobs:
   fetch-trends:
     runs-on: ubuntu-latest

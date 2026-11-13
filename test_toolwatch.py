@@ -1,4 +1,4 @@
-"""v1.46 Tool Watch: arithmetic cross-checked against the real calculator workbook (LibreOffice), calendar, feeds,
+"""v1.46–1.47 Tool Watch: arithmetic cross-checked against the real calculator workbook (LibreOffice), calendar, feeds,
 scoring, ticket text limits, tracker (live → keep/kill), portfolio rules and a full offline weekly run."""
 import glob, html, json, os, shutil, subprocess, sys, tempfile
 from datetime import datetime, timedelta, timezone
@@ -91,6 +91,14 @@ check("tool-shaped: accepted", all(T.tool_shaped(q) for q in ("amazon seller pro
 check("tool-shaped: rejected (regulated, banned, one word, not a tool, login, app)",
       not any(T.tool_shaped(q) for q in ("gst calculator", "income tax calculator", "rummy score calculator", "calculator", "calculator app download",
                                          "sbi login", "loan emi calculator", "cricket score tracker")))
+# v1.47 regressions from the live run of 13 Nov (TW-2646-05 "Murasu Cyclone Tracker +193,500%")
+check("live regression: a cyclone tracker is a news spike / live-data tool, never a ticket",
+      T.classify("murasu cyclone tracker") == "news/weather event — spikes die in days", T.classify("murasu cyclone tracker"))
+check("live-data tools (train, flight, courier, gold price, weather) are not buildable without a feed",
+      all(T.classify(q) == "needs a live data feed" for q in ("train running tracker", "courier parcel tracker", "weather radar tracker")))
+check("sports / election spikes filtered", all(T.classify(q) for q in ("t20 world cup score tracker", "election exit poll calculator")))
+check("evergreen look-alikes still pass (budget planner, rainwater harvesting calculator)",
+      T.classify("monthly budget planner") == "" and T.classify("rainwater harvesting calculator") == "")
 check("canonical key drops noise words", T.canon_key("Free Online EMI Calculator India 2026") == "emi-calculator")
 raw = [{"query": "amazon seller fee calculator", "rise": "+900%", "seed": "amazon seller"},
        {"query": "Amazon Seller Fee Calculator India", "rise": 400, "seed": "calculator"},
@@ -98,10 +106,13 @@ raw = [{"query": "amazon seller fee calculator", "rise": "+900%", "seed": "amazo
        {"query": "age calculator", "rise": 3000, "seed": "calculator"},
        {"query": "gst calculator", "rise": 9000, "seed": "calculator"},
        {"query": "weak thing maker", "rise": 120, "seed": "maker"}]
-cs = T.trend_candidates(raw, {}, "2026-11-16")
+rej = []
+cs = T.trend_candidates(raw + [{"query": "murasu cyclone tracker", "rise": 193500, "seed": "tracker"}], {}, "2026-11-16", rejected=rej)
 by = {c["key"]: c for c in cs}
 check("trend candidates: duplicates merged (max rise), regulated and weak dropped",
       sorted(by) == ["q:age-calculator", "q:amazon-seller-fee-calculator", "q:instagram-bio-generator"] and by["q:amazon-seller-fee-calculator"]["rise"] == 900, sorted(by))
+check("rejected list keeps the reason (shown in the weekly digest)",
+      any(r["query"] == "gst calculator" and "regulated" in r["reason"] for r in rej) and any(r["query"] == "murasu cyclone tracker" and "news" in r["reason"] for r in rej), rej)
 check("seller fit and trivial flags set", by["q:amazon-seller-fee-calculator"]["seller"] and by["q:age-calculator"]["trivial"] and not by["q:instagram-bio-generator"]["trivial"])
 seen1 = T.update_seen([], cs, "2026-11-16")
 seen1b = T.update_seen(seen1, cs, "2026-11-17")
@@ -124,24 +135,73 @@ check("asks: only latest week, no vendor-only / platform-locked / regulated / la
 eng = T.engine_candidates("2026-11-13")
 check("engine tools: 4 tools, each with test cases and an exact formula or rule", len(eng) == 4 and all(c["tests"] and c["formula"] for c in eng))
 check("festival planner gets calendar urgency when a window opens within 35 days", eng[3]["base_score"] == 92 and T.score(eng[3])[0] == 92)
-base = {"type": "search", "rise": 900, "weeks": 1, "seller": False, "trivial": False}
-s0 = T.score(base, {"web_tool_pages": 0})[0]
+ok_shape = {"label": "ok", "rel": 0.2, "recent_share": 0.15, "avg": 20, "active": 0.9}
+base = {"type": "search", "rise": 900, "weeks": 1, "seller": False, "trivial": False, "shape": ok_shape}
+s0 = T.score(base, {"web_tool_pages": 2})[0]
 check("crowded page 1 lowers the score", T.score(base, {"web_tool_pages": 6})[0] < s0 * 0.5)
 check("not checked = ×0.7, never free", abs(T.score(base, None)[0] - s0 * 0.7) < 0.2, (T.score(base, None), s0))
+check("v1.47: ZERO tool sites on page 1 is not a free opportunity (×0.5, 1–2 sites prove tool intent)",
+      abs(T.score(base, {"web_tool_pages": 0})[0] - s0 * 0.5) < 0.2 and T.score(base, {"web_tool_pages": 1})[0] == s0, (T.score(base, {"web_tool_pages": 0}), s0))
 check("persistence ×1.3, seller ×1.25, trivial ×0.6",
-      abs(T.score({**base, "weeks": 2}, {"web_tool_pages": 0})[0] - min(100, s0 * 1.3)) < 0.2
-      and abs(T.score({**base, "seller": True}, {"web_tool_pages": 0})[0] - min(100, s0 * 1.25)) < 0.2
-      and abs(T.score({**base, "trivial": True}, {"web_tool_pages": 0})[0] - s0 * 0.6) < 0.2)
-scored = sorted(((*T.score(c), c) for c in eng + cs + ac), key=lambda x: -x[0])
+      abs(T.score({**base, "weeks": 2}, {"web_tool_pages": 2})[0] - min(100, s0 * 1.3)) < 0.2
+      and abs(T.score({**base, "seller": True}, {"web_tool_pages": 2})[0] - min(100, s0 * 1.25)) < 0.2
+      and abs(T.score({**base, "trivial": True}, {"web_tool_pages": 2})[0] - s0 * 0.6) < 0.2)
+check("v1.47: a % rise beyond 5,000% adds nothing (it only measures how tiny the base was)",
+      T.score({**base, "rise": 193500}, {"web_tool_pages": 2})[0] == T.score({**base, "rise": 5000}, {"web_tool_pages": 2})[0]
+      and "capped" in T.score({**base, "rise": 193500}, {"web_tool_pages": 2})[1])
+sp = {"label": "spike", "rel": 0.1, "recent_share": 0.9, "avg": 5, "active": 0.2}
+tn = {"label": "tiny", "rel": 0.001, "recent_share": 0.1, "avg": 0.3, "active": 0.1}
+check("v1.47: a news-style spike scores ×0.2, a tiny base ×0.5, an unverified volume ×0.6",
+      abs(T.score({**base, "shape": sp}, {"web_tool_pages": 2})[0] - s0 * 0.2) < 0.2 and abs(T.score({**base, "shape": tn}, {"web_tool_pages": 2})[0] - s0 * 0.5) < 0.2
+      and abs(T.score({**base, "shape": None}, {"web_tool_pages": 2})[0] - s0 * 0.6) < 0.2)
+cyc = {**base, "rise": 193500, "shape": None, "seller": False}
+check("live regression: the cyclone ticket would have scored under the quality bar even if the filter missed it",
+      T.score(cyc, {"web_tool_pages": 0})[0] < 25, T.score(cyc, {"web_tool_pages": 0}))
+flat = [10] * 90
+check("demand curve: steady searches vs an anchor → ok", T.shape_from_series(flat, [50] * 90)["label"] == "ok" and abs(T.shape_from_series(flat, [50] * 90)["rel"] - 0.2) < 1e-9)
+check("demand curve: 90% of interest in the last 14 days → spike", T.shape_from_series([0] * 76 + [20] * 14, [50] * 90)["label"] == "spike")
+check("demand curve: a trickle next to the anchor → tiny; all zeros → tiny", T.shape_from_series([1, 0, 0] * 30, [50] * 90)["label"] == "tiny" and T.shape_from_series([0] * 90)["label"] == "tiny")
+check("demand curve: too few points → unknown (never guessed)", T.shape_from_series([5] * 10)["label"] == "unknown")
+check("shape note names the verdict in words", "SPIKE" in T.shape_note(T.shape_from_series([0] * 76 + [20] * 14, [50] * 90), "image compressor"))
+eng_sc = sorted(((*T.score(c), c) for c in eng), key=lambda x: -x[0])
+good = [{"key": f"q:good{i}", "type": "search", "title": f"Good {i}", "query": f"good {i} calculator", "slug": f"good-{i}", "noun": "calculator",
+         "group": "calculator", "rise": 900, "weeks": 1, "seller": True, "trivial": False, "shape": ok_shape} for i in range(3)]
+junk = {"key": "q:junk", "type": "search", "title": "Junk", "query": "junk tracker", "slug": "junk", "noun": "tracker", "group": "planner",
+        "rise": 100000, "weeks": 1, "seller": False, "trivial": False, "shape": None}
+scored = sorted(((*T.score(c, {"web_tool_pages": 2}), c) for c in eng + good + [junk]), key=lambda x: -x[0])
+pk, st = T.pick(scored, [], "2026-11-16", n=5, max_open=8)
+kinds = sorted(c["type"] for _, _, c in pk)
+check("pick (week 1): Wave 1 is staged — 3 engine tools + 2 reserved slots for what the market shows", kinds == ["engine"] * 3 + ["search"] * 2, kinds)
+check("pick: a rising search with NO demand-curve check is never ticketed blind", all(c["key"] != "q:junk" for _, _, c in pk) and st["unverified"] == 1, st)
+junk2 = {**junk, "key": "q:junk2", "shape": sp}
+pkj, stj = T.pick(sorted(((*T.score(c, {"web_tool_pages": 2}), c) for c in eng + good + [junk2]), key=lambda x: -x[0]), [], "2026-11-16", n=5, max_open=8)
+check("pick: a verified news-style spike is under the quality bar and never ticketed", all(c["key"] != "q:junk2" for _, _, c in pkj) and stj["below_bar"] == 1, stj)
+pk0, st0 = T.pick([x for x in scored if x[2]["type"] == "engine"] + [(10.0, "x", junk)], [], "2026-11-16", n=5, max_open=8)
+check("pick: nothing else clears the bar → engine tools use every slot", [c["type"] for _, _, c in pk0].count("engine") == 4 and len(pk0) == 4, [c["key"] for _, _, c in pk0])
 rows0 = [{"key": "eng:rto", "status": "NEW", "type": "engine", "created": "2026-11-02"}]
 pk, st = T.pick(scored, rows0, "2026-11-16", n=5, max_open=8)
 check("pick: skips tools already ticketed, respects the weekly allowance", all(c["key"] != "eng:rto" for _, _, c in pk) and len(pk) == 5, [c["key"] for _, _, c in pk])
 rows_full = [{"key": f"k{i}", "status": "NEW", "type": "search", "created": "2026-10-01"} for i in range(8)]
 pk2, st2 = T.pick(scored, rows_full, "2026-11-16", n=5, max_open=8)
 check("pick: team backlog full (8 open) → no new tickets", pk2 == [] and st2["room"] == 0)
-killed = [{"key": "q:instagram-bio-generator", "status": "KILL", "type": "search", "decision": "2026-10-20: below the bar", "created": "2026-08-01"}]
+killed = [{"key": "q:good0", "status": "KILL", "type": "search", "decision": "2026-10-20: below the bar", "created": "2026-08-01"}]
 pk3, _ = T.pick(scored, killed, "2026-11-16", n=20, max_open=99)
-check("pick: a tool killed in the last 90 days is not re-proposed", all(c["key"] != "q:instagram-bio-generator" for _, _, c in pk3))
+check("pick: a tool killed in the last 90 days is not re-proposed", all(c["key"] != "q:good0" for _, _, c in pk3))
+
+# ── festival planner: no day count without an answer (live regression: Christmas is 42 days away on 13 Nov)
+import season as SE
+check("season.phase: every day count has an answer, 31–44 days = prepare (not 'stock window opens <past date>')",
+      [SE.phase(d)[0] for d in (130, 121, 120, 45, 44, 31, 30, 3, 2, 0)] == ["early", "early", "stock", "stock", "prepare", "prepare", "promote", "promote", "too_late", "too_late"])
+check("Christmas on 13 Nov (42 days) → prepare, not a past 'opens' date", T.festival_plan("Christmas/New Year", "2026-11-13")["phase"] == "prepare"
+      and "opens 2026-08" not in SE.window("SEASONAL: Christmas/New Year", "2026-11-13")["note"] and "prepare" in SE.window("SEASONAL: Christmas/New Year", "2026-11-13")["note"],
+      SE.window("SEASONAL: Christmas/New Year", "2026-11-13")["note"])
+fest = [c for c in eng if c["key"] == "eng:festival"][0]
+check("festival ticket spells out the full verdict table incl. the 31–44 day state and tests its boundaries",
+      any("31–44" in l and "do NOT order new stock" in l for l in fest["formula"]) and sum("prepare creatives" in t for t in fest["tests"]) >= 1
+      and any("promote only" in t for t in fest["tests"]) and any("too late" in t for t in fest["tests"]) and any("(1 day)" in t for t in fest["tests"]), fest["tests"])
+check("event pages carry today's verdict", all("today:" in p for p in fest["pages"]) and any("prepare creatives" in p for p in fest["pages"]))
+tkf = T.make_ticket(fest, "TW-2646-01", "2026-11-13", neighbours=slugs[:3] if False else [], score_val=92, parts="p")
+check("festival ticket still fits one message and keeps WHY NOW (with its demand check)", len(html.escape(tkf["box"])) <= T.BOX_LIMIT and "WHY NOW" in tkf["box"], len(html.escape(tkf["box"])))
 
 # ───────────────────────── 5. tickets
 slugs = [c["slug"] for c in eng]
@@ -154,6 +214,8 @@ check("every engine ticket fits one Telegram message (escaped ≤ 3,600 chars)",
 check("engine tickets keep formula + test cases even when trimmed", all("TEST CASES" in t["box"] and "EXACT FORMULA" in t["box"] for t in boxes))
 check("full text (file / sheet) always has everything", all("Link TO" in t["md"] and "KEEP if" in t["md"] and "Events:" in t["md"] for t in boxes))
 check("ticket states ID, build path, target search, ship-by date", all(x in boxes[0]["box"] for x in ("TW-2646-01", "/tools/amazon-india-seller-profit-calculator", "Target search:", "Ship by: 2026-11-27")))
+check("negative margin/ROI use the same proper minus as the rupee figures", "margin −18.7%" in boxes[0]["md"] + boxes[1]["md"] + boxes[2]["md"] + boxes[3]["md"]
+      and "margin -" not in "".join(t["md"] for t in boxes), [t["md"][:0] for t in boxes])
 check("ticket never presents defaults as Amazon's fees", "never present them as Amazon's fees" in boxes[0]["md"])
 check("tracker row is complete and starts as NEW", set(boxes[0]["row"]) == set(T.TICKET_COLS) and boxes[0]["row"]["status"] == "NEW")
 check("SEO title ≤ 60 chars and never cut mid-word",
@@ -164,6 +226,7 @@ check("rising-search ticket: evidence, competition, spec pattern, formula-source
       "+900%" in tk["box"] and "4 dedicated tool sites" in tk["box"] and "authoritative" in tk["box"] and len(html.escape(tk["box"])) <= T.BOX_LIMIT, tk["box"][:400])
 tk2 = T.make_ticket({**ac[0], "web_pages": -1}, "TW-2647-02", "2026-11-23", neighbours=slugs[:3], score_val=20, parts="y")
 check("ask ticket: links to the asks and says page 1 was not checked", "Ask: https://a" in tk2["box"] and "not checked automatically" in tk2["box"])
+check("standing rules without a site have no '<site>' placeholder", "<site>" not in T.standing_rules() and "bizopstool site" in T.standing_rules())
 check("standing rules fit one message and forbid regulated tools", len(html.escape(T.standing_rules())) < 3900 and "tax, legal, medical, loan" in T.standing_rules())
 
 # ───────────────────────── 6. tracker
@@ -198,7 +261,15 @@ tf.LOCAL_OUT_DIR = TMP
 sent, docs = [], []
 tf.send_telegram = lambda m: sent.append(m)
 tf.send_telegram_document = lambda path, caption="", ctype=None: docs.append(path)
-tf.tw_trends = lambda seeds: (raw, 0)
+raw_live = raw + [{"query": "murasu cyclone tracker", "rise": 193500, "seed": "tracker"},
+                  {"query": "business card maker", "rise": 700, "seed": "maker"}]
+tf.tw_trends = lambda seeds: (raw_live, 0)
+shape_calls = []
+def fake_shapes(queries, anchor=None):
+    shape_calls.append(list(queries))
+    return {q[:90]: ({"label": "tiny", "rel": 0.004, "recent_share": 0.1, "avg": 0.5, "active": 0.2} if q.startswith("age calc") else
+                     {"label": "ok", "rel": 0.2, "recent_share": 0.15, "avg": 20.0, "active": 0.9}) for q in queries}
+tf.tw_shapes = fake_shapes
 tf.auto_web = lambda q: {k: {"web_tool_pages": 2, "web_examples": "x.com"} for k in q}
 tf.tw_gsc = lambda days=28: None
 tf.BIZOPS_SITE = ""
@@ -211,12 +282,17 @@ def run_on(day):
 run_on("2026-11-16")
 tt = pd.read_csv(os.path.join(TMP, "TOOL_TICKETS.csv"), dtype=str).fillna("")
 real = tt[tt["type"] != "rules"]
-check("week 1: 4 engine tools + the best rising search = 5 tickets, plus the rules row",
-      len(real) == 5 and (real["type"] == "engine").sum() == 4 and "q:amazon-seller-fee-calculator" in set(real["key"]) and (tt["type"] == "rules").sum() == 1, list(real["key"]))
+check("week 1 (staged Wave 1): 3 engine tools + the 2 best verified rising searches, plus the rules row — and the cyclone is not one of them",
+      set(real["key"]) == {"eng:festival", "eng:profit", "eng:minprice", "q:amazon-seller-fee-calculator", "q:instagram-bio-generator"}
+      and (tt["type"] == "rules").sum() == 1 and not real["title"].str.contains("Cyclone").any(), list(real["key"]))
+check("demand curves were requested for the engine tools and the strongest candidates only",
+      shape_calls and any("amazon india seller profit calculator" in q for q in shape_calls[0]) and not any("cyclone" in q for q in shape_calls[0]), shape_calls[:1])
 boxes_sent = [m for m in sent if m.startswith("<pre>")]
 check("week 1: digest + rules box + 5 ticket boxes, each within Telegram's limit, one file attached",
       len(sent) == 7 and len(boxes_sent) == 6 and all(len(m) < 4096 for m in sent) and len(docs) == 1 and docs[0].endswith(".md"), (len(sent), len(docs)))
 check("week 1: digest explains how to use it and the honest limits", "tap a grey box" in sent[0] and "Honest limits" in sent[0] and "standing rules" in sent[0])
+check("week 1: digest shows what was filtered and why (cyclone = news spike, GST = regulated) and what was considered",
+      "Filtered (and why)" in sent[0] and "murasu cyclone tracker" in sent[0] and "news/weather" in sent[0] and "regulated" in sent[0] and "Considered, not ticketed" in sent[0], sent[0][:900])
 md = open(docs[0], encoding="utf-8").read()
 check("attached file has the rules and every ticket in full", "STANDING RULES" in md and md.count("## TW-") == 5, md.count("## TW-"))
 run_on("2026-11-16")
@@ -232,16 +308,19 @@ pr = tt[tt["slug"] == "amazon-india-seller-profit-calculator"].iloc[0]
 check("week 2: the page the team published is detected as LIVE without anyone reporting it", pr["status"] == "LIVE" and pr["live_since"] == "2026-11-23")
 new2 = tt[tt["created"] == "2026-11-23"]
 check("week 2: new tickets only for what is not yet ticketed; backlog cap respected", 1 <= len(new2) <= 4 and not (set(new2["key"]) & set(real["key"])), list(new2["key"]))
-ig = new2[new2["key"] == "q:instagram-bio-generator"]
+bc = new2[new2["key"] == "q:business-card-maker"]
 check("week 2: a search seen in week 1 and ticketed now says 'seen in 2 different weeks'",
-      len(ig) == 1 and "seen in 2 different weeks" in ig.iloc[0]["text"], ig["text"].tolist()[:1])
+      len(bc) == 1 and "seen in 2 different weeks" in bc.iloc[0]["text"], bc["text"].tolist()[:1])
+check("week 2: the 4th engine tool (held back in week 1) is ticketed now", "eng:rto" in set(new2["key"]), list(new2["key"]))
+check("tickets carry the demand-curve line", "Demand check:" in bc.iloc[0]["text"] and "OK" in bc.iloc[0]["text"], bc.iloc[0]["text"][:300])
 tf.tw_gsc = lambda days=28: [{"keys": ["https://x.test/tools/amazon-india-seller-profit-calculator"], "clicks": 30, "impressions": 900}]
 run_on("2027-01-25")
 tt = pd.read_csv(os.path.join(TMP, "TOOL_TICKETS.csv"), dtype=str).fillna("")
 pr = tt[tt["slug"] == "amazon-india-seller-profit-calculator"].iloc[0]
 check("week 9: Search Console numbers in → KEEP decided automatically and reported", pr["status"] == "KEEP" and any("KEEP" in m for m in sent[:1]), (pr["status"], pr["decision"]))
 cand = pd.read_csv(os.path.join(TMP, "TOOL_CANDIDATES.csv"), dtype=str)
-check("every scored candidate is saved with its score explanation", len(cand) >= 5 and cand["why_score"].str.len().min() > 5)
+check("every scored candidate is saved with its score explanation and demand-curve numbers", len(cand) >= 5 and cand["why_score"].str.len().min() > 5
+      and {"shape", "rel_volume", "recent_share"} <= set(cand.columns))
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED"); sys.exit(1 if FAILS else 0)

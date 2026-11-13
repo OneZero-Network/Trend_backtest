@@ -247,8 +247,8 @@ check("OPPORTUNITIES: discovered needs for the week", set(op["week"]) == {"2026-
 check("banned topics never reach the report (rummy)", not op["examples"].astype(str).str.contains("rummy").any())
 check("GitHub supply checked per need", calls and len(calls[0]) == 2)
 check("ASKS memory tab written", os.path.exists(os.path.join(TMP, "ASKS.csv")))
-check("admin message v1.46: real-request count, 8-week memory, evidence verdict, focus warning, licence rule",
-      sent and "v1.46" in sent[0] and "8-week memory" in sent[0]
+check("admin message v1.47: real-request count, 8-week memory, evidence verdict, focus warning, licence rule",
+      sent and "v1.47" in sent[0] and "8-week memory" in sent[0]
       and ("enough evidence" in sent[0]) and "no focus words set" in sent[0] and "do NOT reuse" in sent[0], sent[:1])
 check("WAITLIST tab created", os.path.exists(os.path.join(TMP, "WAITLIST.csv")))
 tf.main_automation()

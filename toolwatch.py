@@ -29,6 +29,7 @@ import season
 
 SITE_PATH = "/tools/"
 STANDING_VERSION = 1
+ANCHOR = "image compressor"   # the term every query is compared with in Google Trends (BR_TW_ANCHOR overrides in the runner)
 JUDGE_AFTER_DAYS = 56          # week 8 after the page goes live
 SHIP_DAYS = 14                 # default time we ask the team for
 BAR_IMPRESSIONS_WEEK = 100     # keep bar: ≥100 impressions a week …
@@ -129,7 +130,8 @@ def festival_plan(event, today):
     if not fut:
         return None
     d = fut[0]
-    return {"event": event, "date": d.isoformat(), "days_to": (d - t).days,
+    key, text = season.phase((d - t).days)
+    return {"event": event, "date": d.isoformat(), "days_to": (d - t).days, "phase": key, "phase_text": text,
             "stock_from": (d - timedelta(days=season.STOCK_MAX_LEAD)).isoformat(),
             "stock_until": (d - timedelta(days=season.STOCK_MIN_LEAD)).isoformat(),
             "promote_from": (d - timedelta(days=season.AFF_MAX_LEAD)).isoformat(),
@@ -176,6 +178,13 @@ TREND_SEEDS = NOUN_SEEDS + SELLER_SEEDS
 NOT_TOOL = re.compile(r"\b(login|log in|sign ?in|download|apk|near me|status|result|results|today|live|news|"
                       r"release date|customer care|contact|number|app|movie|song|lyrics|cricket|ipl|job|jobs|"
                       r"vacancy|admit card|cut ?off)\b", re.I)
+# Live-event words: demand arrives as a spike and dies in days (live run 13 Nov: "murasu cyclone tracker +193,500%").
+NEWS_EVENT = re.compile(r"\b(cyclone|storm|hurricane|typhoon|earthquake|quake|flood|floods|tsunami|landslide|heat ?wave|"
+                        r"cold ?wave|election|elections|exit ?poll|t20|odi|world ?cup|match|toss|fixture|squad|lineup|"
+                        r"breaking|verdict|strike|protest|outbreak|virus|covid)\b", re.I)
+# Tools that only work with a live data feed we do not have (and may not be licensed to use).
+LIVE_DATA = re.compile(r"\b(flight|train|pnr|bus|parcel|courier|shipment|awb|gold|silver|petrol|diesel|nifty|sensex|crypto|"
+                       r"bitcoin|weather|traffic|gps|satellite|radar)\b", re.I)
 NOISE = {"online", "free", "india", "indian", "in", "hindi", "app", "website", "web", "tool", "tools", "best", "new",
          "for", "pc", "the", "a", "an", "to", "of", "2024", "2025", "2026", "2027", "with", "and"}
 SELLER_FIT = re.compile(r"\b(amazon|flipkart|meesho|myntra|seller|sellers|reselling|reseller|ecommerce|e-commerce|"
@@ -194,11 +203,29 @@ def tool_noun(q):
     return m.group(1).lower() if m else ""
 
 
-def tool_shaped(q):
+def classify(q):
+    """'' when a query can become a tool ticket, else the plain-words reason it cannot."""
     s = str(q)
     words = re.findall(r"[a-z0-9+#]+", s.lower())
-    return (bool(tool_noun(s)) and 2 <= len(words) <= 6 and not discovery.BANNED.search(s)
-            and not NOT_TOOL.search(s) and not automation.REGULATED.search(s))
+    if not tool_noun(s):
+        return "not a tool"
+    if discovery.BANNED.search(s):
+        return "banned topic"
+    if automation.REGULATED.search(s):
+        return "regulated (tax, loan, insurance…)"
+    if NEWS_EVENT.search(s):
+        return "news/weather event — spikes die in days"
+    if LIVE_DATA.search(s):
+        return "needs a live data feed"
+    if NOT_TOOL.search(s):
+        return "not a tool (login, app, jobs…)"
+    if not 2 <= len(words) <= 6:
+        return "too short or long"
+    return ""
+
+
+def tool_shaped(q):
+    return classify(q) == ""
 
 
 def canon_key(q):
@@ -211,15 +238,21 @@ def nice_title(q):
     return " ".join(w.upper() if w.lower() in ACRONYMS else w.capitalize() for w in words) or str(q).title()
 
 
-def trend_candidates(raw, seen, today):
+RISE_CAP = 5000.0       # Google's own "Breakout" level; beyond it a % rise only measures how tiny the base was
+
+
+def trend_candidates(raw, seen, today, rejected=None):
     """raw: [{'query','rise','seed'}] (Google Trends rising, India, 30 days) → candidates, one per canonical key.
     seen: {key: row} from TOOLWATCH_SEEN (weeks seen so far)."""
     best = {}
     for r in raw:
         q = str(r.get("query", ""))
-        if not tool_shaped(q):
-            continue
         rise = discovery.rise_value(r.get("rise"))
+        why_not = classify(q)
+        if why_not:
+            if rejected is not None and why_not not in ("not a tool", "too short or long") and rise >= 200:
+                rejected.append({"query": q, "rise": rise, "reason": why_not})
+            continue
         if rise < 200:
             continue
         key = canon_key(q)
@@ -238,7 +271,7 @@ def trend_candidates(raw, seen, today):
         out.append({**c, "title": nice_title(c["query"]), "slug": slugify(key), "noun": noun,
                     "group": NOUN_GROUP.get(noun, "calculator"), "weeks": int(_n(s.get("weeks"), 0)) + (0 if s.get("last_week") == week_start(today) else 1),
                     "seller": bool(SELLER_FIT.search(c["query"])), "trivial": bool(TRIVIAL.search(c["query"])),
-                    "seeds": sorted(x for x in c["seeds"] if x)})
+                    "seeds": sorted(x for x in c["seeds"] if x), "shape": None})
     return out
 
 
@@ -295,6 +328,19 @@ def _money(x):
     return ("−" if x < 0 else "") + f"₹{abs(x):,.2f}"
 
 
+def _pct(x):
+    return ("−" if x < 0 else "") + f"{abs(x):.1%}"
+
+
+PHASE_SHORT = {"too_late": "too late", "promote": "promote only", "prepare": "prepare creatives, do NOT order stock",
+               "stock": "stock now", "early": "too early"}
+
+
+def _phase_line(event, ref):
+    p = festival_plan(event, ref)
+    return f"{event} {p['date']}, checked {ref} ({p['days_to']} day{'s' if p['days_to'] != 1 else ''}) → {PHASE_SHORT[p['phase']]}"
+
+
 def engine_candidates(today):
     t = _d(today)
     A = unit_econ(499, 150)
@@ -302,8 +348,8 @@ def engine_candidates(today):
     C = unit_econ(999, 400, itc=0, referral=0.15, rto=0.25, ship=80)
     def ue(price, cost, e, extra=""):
         return (f"price ₹{price}, cost ₹{cost}{extra} → fees {_money(e['fees'])}, GST payable {_money(e['gst_pay'])}, "
-                f"RTO cost {_money(e['rto_cost'])}, profit {_money(e['profit'])}, margin {e['margin']:.1%}, "
-                f"ROI {e['roi']:.1%} → {e['decision']}")
+                f"RTO cost {_money(e['rto_cost'])}, profit {_money(e['profit'])}, margin {_pct(e['margin'])}, "
+                f"ROI {_pct(e['roi'])} → {e['decision']}")
     mp = min_price(150)
     mp2 = min_price(400, margin=0.25, roi=0.50, referral=0.15, rto=0.25, ship=80)
     rl = rto_loss(1000, 0.15, 60, 2, damaged=0.10, cost=150)
@@ -388,12 +434,16 @@ def engine_candidates(today):
          "build": ["One main page + one landing page per upcoming event (list below). Dates come from our calendar and must be used as given; lunar-festival dates are updated by us every October."],
          "formula": [f"stock window: {season.STOCK_MAX_LEAD} to {season.STOCK_MIN_LEAD} days before the event (bulk order → sample → inbound takes ~6 weeks)",
                      f"promotion window: {season.AFF_MAX_LEAD} to {season.AFF_MIN_LEAD} days before the event; peak ≈ 4 days before",
-                     "verdict: >120 days → too early · 45–120 → stock now · 3–30 → promote only (too late to stock) · <3 → too late"],
-         "tests": [f"1) Makar Sankranti/Lohri/Pongal 2027-01-14, checked on 2026-11-13 → stock between {fp['stock_from']} and {fp['stock_until']}, "
-                   f"promote {fp['promote_from']} to {fp['promote_until']}, peak {fp['peak']}, {fp['days_to']} days to go"]
-                  + [f"{i + 2}) {p['event']} {p['date']}: stock {p['stock_from']}→{p['stock_until']}, promote {p['promote_from']}→{p['promote_until']} — page live by {(_d(p['promote_from']) - timedelta(days=7)).isoformat()}"
-                     for i, p in enumerate(events[:6])],
-         "pages": [f"/tools/festival-stock-planner-india/{slugify(p['event'].split('/')[0])}-{p['date'][:4]}" for p in events],
+                     "verdict by days to the event: over 120 → too early (say when it opens) · 45–120 → stock now · 31–44 → stock window closed and promotion not open yet: "
+                     "prepare creatives, do NOT order new stock · 3–30 → promote only · under 3 → too late"],
+         "tests": [f"1) Makar Sankranti/Lohri/Pongal 2027-01-14, checked 2026-11-13 ({fp['days_to']} days) → {PHASE_SHORT[fp['phase']]}; "
+                   f"stock between {fp['stock_from']} and {fp['stock_until']}, promote {fp['promote_from']} to {fp['promote_until']}, peak {fp['peak']}",
+                   "2) " + _phase_line("Makar Sankranti/Lohri/Pongal", "2026-12-05"),
+                   "3) " + _phase_line("Makar Sankranti/Lohri/Pongal", "2026-12-20"),
+                   "4) " + _phase_line("Makar Sankranti/Lohri/Pongal", "2027-01-13")],
+         "pages": [f"/tools/festival-stock-planner-india/{slugify(p['event'].split('/')[0])}-{p['date'][:4]} — {p['date']}: "
+                   f"stock {p['stock_from']}→{p['stock_until']} · promote {p['promote_from']}→{p['promote_until']} · live by "
+                   f"{(_d(p['promote_from']) - timedelta(days=7)).isoformat()} · today: {PHASE_SHORT[p['phase']]}" for p in events],
          "faq_extra": "When should I order stock for Diwali / Rakhi / Holi?", "next": "Check the margin first in the profit calculator.",
          "urgent": bool(events and (_d(events[0]["promote_from"]) - t).days <= 35)},
     ]
@@ -402,11 +452,54 @@ def engine_candidates(today):
 # ══════════════════════════════════════════════════════════════════════
 # 4. Scoring
 # ══════════════════════════════════════════════════════════════════════
+TINY_REL = 0.02          # average interest below this share of the anchor term = too small to matter (calibrate from TOOL_CANDIDATES)
+SPIKE_SHARE = 0.6        # ≥60% of 90 days' interest inside the last 14 days = a news-style spike
+SHAPE_MULT = {"ok": 1.0, "tiny": 0.5, "spike": 0.2, "unknown": 0.6, None: 0.6}
+
+
+def shape_from_series(q_vals, anchor_vals=None, tiny_rel=None, spike_share=None):
+    """Google Trends interest-over-time (daily, 90 days, India) for the query (and an anchor term compared in the same
+    request) → how the demand looks. A % rise alone cannot tell a real trend from a tiny base or a news spike."""
+    tiny_rel = TINY_REL if tiny_rel is None else tiny_rel
+    spike_share = SPIKE_SHARE if spike_share is None else spike_share
+    q = [float(x) for x in q_vals]
+    n = len(q)
+    if n < 30:
+        return {"label": "unknown", "rel": None, "recent_share": None, "avg": None, "active": None}
+    total = sum(q)
+    avg = total / n
+    am = (sum(float(x) for x in anchor_vals) / len(anchor_vals)) if anchor_vals else 0.0
+    rel = (avg / am) if am > 0 else None
+    recent = (sum(q[-14:]) / total) if total > 0 else 0.0
+    active = sum(1 for x in q if x > 0) / n
+    if total > 0 and recent >= spike_share:
+        label = "spike"
+    elif total == 0 or avg < 1.0 or (rel is not None and rel < tiny_rel):
+        label = "tiny"
+    else:
+        label = "ok"
+    return {"label": label, "rel": rel, "recent_share": recent, "avg": avg, "active": active}
+
+
+def shape_note(sh, anchor="the anchor term"):
+    if not sh or sh.get("label") == "unknown":
+        return "search volume NOT verified (Google Trends comparison unavailable this week)"
+    rel = f"{sh['rel']:.0%} of '{anchor}'" if sh.get("rel") is not None else "volume vs anchor n/a"
+    return (f"90-day demand curve: {sh['label'].upper()} — {rel}, {sh['recent_share']:.0%} of the interest in the last 14 days, "
+            f"searched on {sh['active']:.0%} of days")
+
+
 def openness(web_pages):
-    """Share of the opportunity left after what page 1 already offers. None = not checked."""
+    """Share of the opportunity left on page 1. None = not checked. Zero tool sites is NOT a free opportunity: it more
+    often means nobody wants a tool for that search. 1–2 tool sites prove tool intent and are beatable."""
     if web_pages is None or web_pages < 0:
         return 0.7, "page 1 not checked ×0.7"
-    return 1 / (1 + 0.35 * web_pages), f"{web_pages} dedicated tool sites on page 1 ×{1 / (1 + 0.35 * web_pages):.2f}"
+    if web_pages == 0:
+        return 0.5, "0 tool sites on page 1 — no proof anyone wants a tool for this ×0.5"
+    if web_pages <= 2:
+        return 1.0, f"{web_pages} tool site{'s' if web_pages > 1 else ''} on page 1 (proves tool intent, beatable) ×1.00"
+    o = 1 / (1 + 0.35 * (web_pages - 2))
+    return o, f"{web_pages} tool sites on page 1 ×{o:.2f}"
 
 
 def score(c, web=None):
@@ -416,18 +509,23 @@ def score(c, web=None):
         s = float(c["base_score"])
         parts.append(f"engine-backed (logic already built and tested) {c['base_score']}" + (" (includes +10 calendar urgency)" if c.get("urgent") else ""))
         return round(min(100.0, s), 1), "; ".join(parts)
+    label = (c.get("shape") or {}).get("label")
     if c["type"] == "ask":
         s = min(100.0, c["base"]) * (1.0 if c["requests"] >= 2 else 0.7)
         parts.append(f"asks score {c['base']:.0f} ({c['requests']} asks, {c['votes']} votes)" + ("" if c["requests"] >= 2 else " ×0.7 single ask"))
+        if label == "spike":
+            s *= 0.2; parts.append("×0.2 news-style spike")
         mult, txt = openness((web or {}).get("web_tool_pages") if web else None)
         s *= mult
         parts.append(txt)
         if c.get("seller"):
             s *= 1.25; parts.append("×1.25 seller aisle")
         return round(min(100.0, s), 1), "; ".join(parts)
-    d = min(55.0, 15 * math.log10(1 + c["rise"])) + 5
-    parts.append(f"rising +{c['rise']:,.0f}% → {d:.0f}")
-    mult = 1.0
+    rise = min(float(c["rise"]), RISE_CAP)
+    d = min(55.0, 15 * math.log10(1 + rise)) + 5
+    parts.append(f"rise +{min(c['rise'], RISE_CAP):,.0f}%" + (" (capped: a bigger % only means a tinier base)" if c["rise"] > RISE_CAP else "") + f" → {d:.0f}")
+    mult = SHAPE_MULT.get(label, 0.6)
+    parts.append(f"{label} demand curve ×{mult}" if label in ("ok", "tiny", "spike") else "volume not verified ×0.6")
     if c.get("weeks", 1) >= 2:
         mult *= 1.3; parts.append("×1.3 seen in 2+ weeks")
     if c.get("seller"):
@@ -552,6 +650,11 @@ def make_ticket(c, tid, today, site="", neighbours=None, score_val=0.0, parts=""
             f"Ship by: {ship_by.isoformat()} · judged 8 weeks after it goes live"]
     if c["type"] == "engine":
         why = list(c["why"])
+        if c.get("shape"):
+            why.append("Demand check: " + shape_note(c["shape"], ANCHOR))
+            if c["shape"].get("label") in ("tiny", "unknown", "spike") or (c["shape"].get("rel") or 1) < 0.1:
+                why.append("Expect few visitors from Google at first: this tool is found through the Telegram channel and the seller brief. "
+                           "Judge it on tool_use as well as impressions.")
         who = c["who"]
         inputs, outputs, build = list(c["inputs"]), list(c["outputs"]), list(c["build"])
         formula, tests = list(c["formula"]), list(c["tests"])
@@ -566,6 +669,7 @@ def make_ticket(c, tid, today, site="", neighbours=None, score_val=0.0, parts=""
             if c.get("reusable"):
                 why.append(f"Reusable code (check licence): {c['reusable']}")
             why += [f"Ask: {u}" for u in c.get("links", [])]
+        why.append("Demand check: " + shape_note(c.get("shape"), ANCHOR))
         why.append("Search-page competition: " + (f"{c['web_pages']} dedicated tool sites on page 1 ({c.get('web_examples', '')}) — differentiate: no signup, India defaults, explanation, speed."
                    if c.get("web_pages", -1) is not None and c.get("web_pages", -1) >= 0 else "not checked automatically — search the target query once; if 6+ dedicated tool sites rank, say how this will be better or REJECT."))
         who = "Anyone searching this phrase in India" + (" — mostly sellers/resellers (seller aisle)." if c.get("seller") else ".")
@@ -606,7 +710,7 @@ def make_ticket(c, tid, today, site="", neighbours=None, score_val=0.0, parts=""
 # 6. Standing rules (sent once)
 # ══════════════════════════════════════════════════════════════════════
 def standing_rules(site=""):
-    where = (site.rstrip("/") + SITE_PATH + "<slug>") if site else "<site>" + SITE_PATH + "<slug>"
+    where = (site.rstrip("/") + SITE_PATH + "<slug>") if site else SITE_PATH + "<slug> on the bizopstool site"
     return "\n".join([
         f"BIZOPSTOOL — STANDING RULES FOR EVERY TICKET (v{STANDING_VERSION})",
         "",
@@ -660,7 +764,7 @@ def update_tracker(rows, today, live_fn=None, stats=None):
                 r["status"] = "KEEP" if ok else "KILL"
                 r["decision"] = (f"{t.isoformat()}: {'meets' if ok else 'below'} the bar after {age} days "
                                  f"({imp:.0f} impressions / {clk:.0f} clicks in 28 days)")
-                events.append(f"{'🟢 KEEP' if ok else '🔴 KILL (merge or remove)'}: {r['title']} — {imp:.0f} impressions, {clk:.0f} clicks (28 days)")
+                events.append(f"{'🟢 KEEP' if ok else '🔴 KILL (merge or remove — first ask the team for its tool_use count)'}: {r['title']} — {imp:.0f} impressions, {clk:.0f} clicks (28 days)")
             elif age >= 28 and imp == 0:
                 r["decision"] = f"{t.isoformat()}: no impressions after {age} days — check sitemap, internal links, indexing"
                 events.append(f"⚠️ no impressions after {age} days: {r['title']} — ask the team to check sitemap/indexing")
@@ -707,9 +811,11 @@ def nudge_text(rows, today):
 # ══════════════════════════════════════════════════════════════════════
 # 8. Selection
 # ══════════════════════════════════════════════════════════════════════
-def pick(scored, existing_rows, today, n=5, max_open=8):
-    """scored: [(score, parts, cand)] best first → picks not already ticketed (or killed in the last 90 days),
-    limited by n per week and by the team's open backlog."""
+def pick(scored, existing_rows, today, n=5, max_open=8, min_score=25.0, reserve=2):
+    """scored: [(score, parts, cand)] best first → picks not already ticketed (or killed in the last 90 days), limited by n
+    per week and by the team's open backlog. Non-engine candidates must clear `min_score` (better no ticket than a junk
+    one); a rising search also needs a demand-curve check (never ticketed blind); at least `reserve` slots go to them
+    when they exist, so Wave 1 never crowds out everything else."""
     t = _d(today)
     have = {r.get("key") for r in existing_rows}
     killed_recent = {r.get("key") for r in existing_rows if r.get("status") == "KILL"
@@ -717,14 +823,16 @@ def pick(scored, existing_rows, today, n=5, max_open=8):
     open_n = sum(1 for r in existing_rows if r.get("status") == "NEW" and r.get("type") != "rules")
     this_week = sum(1 for r in existing_rows if r.get("type") != "rules" and str(r.get("created", "")) >= week_start(t))
     room = max(0, min(n - this_week, max_open - open_n))       # weekly allowance AND the team's backlog cap
-    out = []
-    for s, parts, c in scored:
-        if len(out) >= room:
-            break
-        if c["key"] in have or c["key"] in killed_recent:
-            continue
-        out.append((s, parts, c))
-    return out, {"room": room, "open": open_n, "this_week": this_week}
+    fresh = [x for x in scored if x[2]["key"] not in have and x[2]["key"] not in killed_recent]
+    verified = lambda c: c["type"] != "search" or (c.get("shape") or {}).get("label") in ("ok", "tiny", "spike")
+    eng = [x for x in fresh if x[2]["type"] == "engine"]
+    oth = [x for x in fresh if x[2]["type"] != "engine" and verified(x[2]) and x[0] >= min_score]
+    below = sum(1 for x in fresh if x[2]["type"] != "engine" and verified(x[2]) and x[0] < min_score)
+    unverified = sum(1 for x in fresh if x[2]["type"] == "search" and not verified(x[2]))
+    k_oth = min(len(oth), max(reserve, room - len(eng)), room)
+    k_eng = min(len(eng), room - k_oth)
+    out = sorted(eng[:k_eng] + oth[:k_oth], key=lambda x: -x[0])
+    return out, {"room": room, "open": open_n, "this_week": this_week, "below_bar": below, "unverified": unverified, "min_score": min_score}
 
 
 def next_ids(existing_rows, today, count):
@@ -741,7 +849,7 @@ def neighbours_for(c, all_slugs, seller_slugs):
     return pool[:3]
 
 
-def build_digest(week, picks_made, stats, portfolio_lines, events, nudge, first_run):
+def build_digest(week, picks_made, stats, portfolio_lines, events, nudge, first_run, filtered=None, considered=None):
     """→ header message (HTML) for the admin chat."""
     e = html.escape
     L = [f"🧰 <b>Tool Watch</b> — week of {week} (admin only · copy-paste tickets for the bizopstool team)"]
@@ -761,6 +869,17 @@ def build_digest(week, picks_made, stats, portfolio_lines, events, nudge, first_
         L.append("\nNo new tickets this week" + (": the team's backlog is full — ship those first." if stats["room"] == 0 else " — nothing new cleared the filters."))
     if first_run:
         L.append("A one-time <b>standing rules</b> box comes first — send it to the team once.")
+    if stats.get("below_bar"):
+        L.append(f"{stats['below_bar']} candidate{'s' if stats['below_bar'] != 1 else ''} below the quality bar ({stats.get('min_score', 25):.0f}/100) — "
+                 "no ticket is better than a junk ticket.")
+    if stats.get("unverified"):
+        L.append(f"{stats['unverified']} rising search{'es' if stats['unverified'] != 1 else ''} could not get a demand-curve check "
+                 "(Google Trends refused) — never ticketed blind; they are re-checked next week.")
+    if filtered:
+        top = sorted(filtered, key=lambda r: -r["rise"])[:6]
+        L.append("🚫 <b>Filtered (and why):</b> " + e(" · ".join(f"{r['query']} +{min(r['rise'], 99999):,.0f}% ({r['reason']})" for r in top)))
+    if considered:
+        L.append("🤔 <b>Considered, not ticketed:</b> " + e(" · ".join(f"{c['query'][:40]} {sc:.0f}/100" for sc, _p, c in considered[:5])))
     for ev in events:
         L.append(e(ev))
     L += [e(x) for x in portfolio_lines]

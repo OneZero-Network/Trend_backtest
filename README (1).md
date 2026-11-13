@@ -130,6 +130,18 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.47: Tool Watch fixes from the first live run (a rising % is not demand)
+The first live run ticketed a **cyclone** ("Cyclone Montha" +900%), proposed a "tool" for a query with **zero** tool sites on page 1 as if that were an opening, and a festival verdict had a **gap at 31–44 days**. Reverse logic: what made those win? A % rise ranks the *smallest base* first, and news words look like searches. Fixes:
+- **Rise is capped at 5,000%** (a bigger % only means a tinier base) and multiplied by the **demand curve**: Google Trends interest over 90 days, compared with an anchor term (`BR_TW_ANCHOR`, default "image compressor"). `spike` (≥ 60% of interest in the last 14 days) ×0.2, `tiny` (below 2% of the anchor) ×0.5, `ok` ×1.0, unchecked ×0.6. **A rising search is never ticketed without that check.** The shape numbers are stored per candidate (`shape`, `rel_volume`, `recent_share`) in `TOOL_CANDIDATES`, so thresholds can be calibrated from real data (`BR_TW_TINY_REL`, `BR_TW_SPIKE_SHARE` override them).
+- **News, weather and live-data filters** (cyclone, storm, election, IPL, train/flight status, gold rate, courier tracking…). They are skipped **with a plain-words reason**; the digest lists "🚫 Filtered (and why)" and "🤔 Considered, not ticketed".
+- **Empty page 1 is no longer an opening.** 0 tool sites ×0.5 (no proof anyone wants a tool); 1–2 sites ×1.0 (proof of tool intent, beatable); then crowding discounts.
+- **Quality bar** (`BR_TW_MIN_SCORE`, default 25): below it a search is not ticketed, even in a quiet week; the digest says how many fell below. **Staged Wave 1:** 3 engine tools plus the 2 best verified searches in week 1; the 4th engine tool follows in week 2.
+- **Festival planner has a full verdict table** (too early → stock now → prepare creatives, **do not order stock** at 31–44 days → promote only → too late), tests on both sides of each boundary, and a "today:" verdict on every event page. The earlier note "too early; stock window opens <past date>" is gone.
+- **Google Trends rate limits:** each seed retries after a 60 s pause; the run stops cleanly after 3 lost seeds instead of silently skipping them.
+- Cosmetics: proper minus signs, no `<site>` placeholder in the rules box, "1 day" singular.
+
+**Calibrate, don't trust:** the anchor term, the spike/tiny thresholds and the score bar of 25 are first guesses. After 3–4 weekly runs, read the `TOOL_CANDIDATES` tab (rows with a shape and a score) and move the thresholds so the tickets you would have rejected sit below the bar. Demand for the four engine tools is still unmeasured: that is what `BIZOPS_SITE` + `GSC_SITE` tracking is for.
+
 ## v1.46: Tool Watch — ready-to-send tickets for the bizopstool team (automatic, weekly)
 **What it is:** a runner (`toolwatch.yml`, Mondays 14:00 IST, after the 12:00 automation report). It writes the tickets the bizopstool tech team builds from. **You copy and send; you fill in nothing.**
 

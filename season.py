@@ -35,6 +35,21 @@ STOCK_MIN_LEAD = 45                     # bulk stock: quote→sample→bulk→in
 STOCK_MAX_LEAD = 120                    # earlier than this = capital locked for months
 
 
+def phase(dt):
+    """Days to the event → (key, plain text). Every day count has an answer: the 31–44 day gap (stock window
+    closed, promotion not open yet) used to say 'too early; stock window opens <a date in the past>'."""
+    if dt < AFF_MIN_LEAD:
+        return "too_late", "too late — demand peaks before the day"
+    if dt <= AFF_MAX_LEAD:
+        return "promote", "promote now — too late to order stock"
+    if dt < STOCK_MIN_LEAD:
+        return "prepare", (f"stock window closed (inbound takes ~6 weeks), promotion opens in {dt - AFF_MAX_LEAD} day{'s' if dt - AFF_MAX_LEAD != 1 else ''} — "
+                           "prepare creatives, do not order new stock")
+    if dt <= STOCK_MAX_LEAD:
+        return "stock", "stock now — order in bulk, then promote"
+    return "early", f"too early — stock window opens in {dt - STOCK_MAX_LEAD} day{'s' if dt - STOCK_MAX_LEAD != 1 else ''}"
+
+
 def _d(x):
     return x if isinstance(x, date) else date.fromisoformat(str(x)[:10])
 
@@ -74,9 +89,7 @@ def window(seasonal_flag, today):
                 elif aff:
                     note = f"{n} in {dt}d — promote now; too late to stock" if not stock else f"{n} in {dt}d"
                 else:
-                    note = (f"{n} on {fut[0]} ({dt}d) — " +
-                            (f"stock window open; promote from {fut[0] - timedelta(days=AFF_MAX_LEAD)}" if stock
-                             else f"too early; stock window opens {fut[0] - timedelta(days=STOCK_MAX_LEAD)}"))
+                    note = f"{n} on {fut[0]} ({dt}d) — " + phase(dt)[1]
                 r = {"event": n, "days_to": dt, "affiliate_ok": aff, "stock_ok": stock, "note": note}
         # most restrictive wins
         if worst is None or (r["affiliate_ok"], r["stock_ok"]) < (worst["affiliate_ok"], worst["stock_ok"]):

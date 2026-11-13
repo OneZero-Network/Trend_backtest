@@ -150,7 +150,10 @@ k3 = " ".join(sorted(g3[0]["core"][:3]))
 r3 = A.finalize_v38(A.open_rows_v2(g3, {}, {}, "2026-11-09"), {}, {k3: wc})[0]
 check("BUILD on GitHub but 3 tool sites on page 1 → CROWDED", r3["gap"] == "CROWDED" and r3["web_tool_pages"] == 3, (r3["gap"], r3["web_tool_pages"]))
 r4 = A.finalize_v38(A.open_rows_v2(g3, {}, {}, "2026-11-09"), {}, {}, focus_words=["llm", "token", "openai"])[0]
-check("off-focus need → PARKED, never shortlisted", r4["status"] == "PARKED (off focus)" and not r4["fits_focus"])
+r4b = A.finalize_v38(A.open_rows_v2(g3, {}, {}, "2026-11-09"), {}, {})[0]
+check("v1.46: off-focus need is NOT parked — it keeps its place at ×0.8 (focus is a boost, not a filter)",
+      r4["status"] != "PARKED (off focus)" and not r4["fits_focus"] and abs(float(r4["score"]) - round(float(r4b["score"]) * 0.8, 1)) < 0.15
+      and "×0.8 outside focus words" in r4["score_parts"], (r4["status"], r4["score"], r4b["score"]))
 g5 = A.cluster_needs([{"source": "hn", "text": "Is there a tool to track LLM token cost per request", "weight": 90},
                       {"source": "github_issue", "text": "Feature request: track LLM token cost per request", "weight": 70},
                       {"source": "stackoverflow", "text": "How to track LLM token cost per API request", "weight": 2000},
@@ -160,6 +163,14 @@ check("in-focus need with 4 asks from 4 sources → fits focus, confidence Mediu
       r5["fits_focus"] and r5["confidence"] in ("Medium", "High"), (r5["fits_focus"], r5["confidence"]))
 sp2 = A.gh_supply(5, [{"full_name": "z/old", "stargazers_count": 300, "pushed_at": "2023-01-01T00:00:00Z", "license": {"spdx_id": "MIT"},
                        "description": "", "topics": [], "html_url": "u"}], now=now)
+# v1.46: a repo only counts as supply when it is about the need (live report: "desktop" matched Teamwork/clippy.desktop)
+rep = [{"full_name": "Teamwork/clippy.desktop", "stargazers_count": 85, "pushed_at": "2016-07-18T00:00:00Z", "license": {"spdx_id": "MIT"},
+        "description": "Clippy for desktop", "topics": [], "html_url": "u1"},
+       {"full_name": "ryoppippi/ccusage", "stargazers_count": 9000, "pushed_at": "2026-11-01T00:00:00Z", "license": {"spdx_id": "MIT"},
+        "description": "CLI tool for analyzing Claude Code usage statistics", "topics": ["usage", "cli"], "html_url": "u2"}]
+sp3 = A.gh_supply(40, rep, now=now, words=["desktop", "usage", "panel"])
+check("v1.46: keyword-collision repo dropped from supply; the real usage tool stays", [t["repo"] for t in sp3["gh_top"]] == ["ryoppippi/ccusage"], sp3["gh_top"])
+check("no words given → old behaviour (all repos)", len(A.gh_supply(40, rep, now=now)["gh_top"]) == 2)
 check("repo quality note + last commit date", sp2["gh_top"][0]["note"].startswith("stale") and sp2["gh_top"][0]["updated"] == "2023-01-01")
 
 # ── v1.39 — only real tool requests are demand (from the 10 Nov live run)
@@ -236,8 +247,8 @@ check("OPPORTUNITIES: discovered needs for the week", set(op["week"]) == {"2026-
 check("banned topics never reach the report (rummy)", not op["examples"].astype(str).str.contains("rummy").any())
 check("GitHub supply checked per need", calls and len(calls[0]) == 2)
 check("ASKS memory tab written", os.path.exists(os.path.join(TMP, "ASKS.csv")))
-check("admin message v1.42: real-request count, 8-week memory, evidence verdict, focus warning, licence rule",
-      sent and "v1.42" in sent[0] and "8-week memory" in sent[0]
+check("admin message v1.46: real-request count, 8-week memory, evidence verdict, focus warning, licence rule",
+      sent and "v1.46" in sent[0] and "8-week memory" in sent[0]
       and ("enough evidence" in sent[0]) and "no focus words set" in sent[0] and "do NOT reuse" in sent[0], sent[:1])
 check("WAITLIST tab created", os.path.exists(os.path.join(TMP, "WAITLIST.csv")))
 tf.main_automation()

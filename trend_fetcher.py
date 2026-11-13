@@ -35,7 +35,7 @@
 import os, re, sys, json, math, time, random, traceback, html as _html
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from discount_rule import discount_status            # shared with backtest — one rule
-import calculator, compliance, youtube_check, sourcing, picks, brief, discovery, automation, season
+import calculator, compliance, youtube_check, sourcing, picks, brief, discovery, automation, season, toolwatch
 from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree as ET
 
@@ -128,7 +128,7 @@ YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 BR_YT_TOP_N     = int(os.environ.get("BR_YT_TOP_N", "15"))       # ≈101 quota units each; free quota 10,000/day
 # State trends run in their own weekly workflow (BR_MODE=states), not in the daily run:
 # ~20 rate-limited Google calls would slow the daily run and risk blocking rising-queries.
-BR_MODE         = os.environ.get("BR_MODE") or "daily"          # daily | states | sourcing | affiliate | brief | estimate | drip | discover
+BR_MODE         = os.environ.get("BR_MODE") or "daily"          # daily | states | sourcing | affiliate | brief | estimate | drip | discover | automation | toolwatch
 BR_SOURCING_TOP_N   = int(os.environ.get("BR_SOURCING_TOP_N") or "20")     # products searched per run
 AFFILIATE_TAG     = os.environ.get("AFFILIATE_TAG") or ""         # your Amazon Associates tag, e.g. name-21
 AFFILIATE_GROUPS = os.environ.get("AFFILIATE_GROUPS") or ""
@@ -1144,7 +1144,7 @@ def _sheet_fix_hint(exc, email):
 
 PICK_LINE = []          # forward-test verdict for the daily digest
 
-PROTECTED_TABS = {"HISTORY", "PICKS", "DETAIL_HISTORY", "GTRENDS_HISTORY", "YT_HISTORY", "SOURCING_HISTORY",
+PROTECTED_TABS = {"TOOL_TICKETS", "HISTORY", "PICKS", "DETAIL_HISTORY", "GTRENDS_HISTORY", "YT_HISTORY", "SOURCING_HISTORY",
                   "DISCOVERY", "AFF_POST_LOG", "ASKS", "OPPORTUNITIES"}
 
 
@@ -1499,15 +1499,16 @@ def _affiliate_groups(store, hist, sig, last):
         send_telegram("⚠️ AFFILIATE_TAG not set — links carry no Associates tag, so they earn nothing.")
 
 
-def send_telegram_document(path, caption=""):
+def send_telegram_document(path, caption="", ctype=None):
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         return
+    ctype = ctype or ("text/markdown" if str(path).endswith(".md") else "text/html")
     try:
         with open(path, "rb") as fh:
             blob = fh.read()
         r = _tg_post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
                      data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
-                     files={"document": (os.path.basename(path), blob, "text/html")}, timeout=60)
+                     files={"document": (os.path.basename(path), blob, ctype)}, timeout=60)
         if r.status_code != 200:
             log(f"Telegram document HTTP {r.status_code}: {r.text[:200]}", "WARN")
     except Exception as exc:
@@ -2248,7 +2249,7 @@ def auto_github(queries):
         j = _get_json("https://api.github.com/search/repositories",
                       {"q": q, "sort": "stars", "order": "desc", "per_page": 10}, headers=hdr)
         if j:
-            out[key] = automation.gh_supply(j.get("total_count", 0), j.get("items", []))
+            out[key] = automation.gh_supply(j.get("total_count", 0), j.get("items", []), words=str(q).split())
         time.sleep(2.5 if GITHUB_API_TOKEN else 7)        # search API: 30/min with token, 10/min without
     return out
 
@@ -2380,14 +2381,18 @@ def main_automation():
     rows = automation.finalize_v38(rows, {}, web, BR_AUTO_FOCUS_WORDS)
     names = {" ".join(sorted(g["core"][:3])): automation.display_name(g) for g in groups[:BR_AUTO_SUPPLY_CHECKS]}
     vend = {" ".join(sorted(g["core"][:3])): automation.vendor_only(g) for g in groups[:BR_AUTO_SUPPLY_CHECKS]}
+    repos_of = {" ".join(sorted(g["core"][:3])): sorted({"/".join(str(it.get("url", "")).split("github.com/")[-1].split("/")[:2])
+                                                          for it in g["items"] if "github.com/" in str(it.get("url", ""))})
+                for g in groups[:BR_AUTO_SUPPLY_CHECKS]}
     for r in rows:
         r["name"] = names.get(r["bucket"]) or names.get(" ".join(sorted(r["problem"].split()[:3]))) or r["problem"]
         k3 = " ".join(sorted(r["problem"].split()[:3]))
+        r["repos"] = ", ".join((repos_of.get(r["bucket"]) or repos_of.get(k3) or [])[:4])
         if vend.get(r["bucket"]) or vend.get(k3):
             r["gap"], r["status"] = "VENDOR-ONLY", "watch"
             r["score"] = round(float(r["score"]) * 0.2, 1)
             r["score_parts"] += " ×0.2 vendor-only (only the product's maker can build it)"
-    rows.sort(key=lambda r: (not r["fits_focus"], r["gap"] == "VENDOR-ONLY", -float(r["score"])))
+    rows.sort(key=lambda r: (r["gap"] == "VENDOR-ONLY", -float(r["score"])))
     new = pd.DataFrame(rows).astype(str)
     keep = old[old["week"] != week] if not old.empty else old
     store.write("OPPORTUNITIES", pd.concat([keep, new], ignore_index=True) if not keep.empty else new)
@@ -2401,15 +2406,13 @@ def main_automation():
     by_src = {}
     for it in items:
         by_src[it["source"]] = by_src.get(it["source"], 0) + 1
-    L = [f"🛠 <b>What people want built</b> — week of {week} · v1.42 (admin only · for bizopstool)",
+    L = [f"🛠 <b>What people want built</b> — week of {week} · v1.46 (admin only · for bizopstool)",
          "Requests read: " + " · ".join(f"{k} {v}" for k, v in sorted(by_src.items())) + f" → {len(groups)} distinct needs"
          + (f" · focus words: {', '.join(BR_AUTO_FOCUS_WORDS)}" if BR_AUTO_FOCUS_WORDS else " · ⚠️ no focus words set (BR_AUTO_FOCUS_WORDS)")
          + ("" if BRAVE_API_KEY else " · web crowding: not checked (no BRAVE_API_KEY)")]
-    infocus = [r for r in rows if r["fits_focus"]]
-    parked = [r for r in rows if not r["fits_focus"]]
-    strong = [r for r in infocus if r["confidence"] in ("Medium", "High") and r["gap"] != "VENDOR-ONLY"]
-    vendor = [r for r in infocus if r["gap"] == "VENDOR-ONLY"]
-    weak = [r for r in infocus if r["confidence"] == "Low"]
+    strong = [r for r in rows if r["confidence"] in ("Medium", "High") and r["gap"] != "VENDOR-ONLY"]
+    vendor = [r for r in rows if r["gap"] == "VENDOR-ONLY"]
+    weak = [r for r in rows if r["confidence"] == "Low" and r["gap"] != "VENDOR-ONLY"]
     L.append(f"Real tool requests: {new_n} new of {raw_n} items · {len(items)} in the {automation.WINDOW_WEEKS}-week memory · "
              f"{len(strong)} needs with enough evidence")
     if not strong:
@@ -2424,11 +2427,14 @@ def main_automation():
         if r["npm_packages"]: comp.append(f"{r['npm_packages']} npm pkgs")
         if r["gh_easy"]: comp.append(f"{r['gh_easy']} easy GitHub tools")
         L.append(f"\n{star} <b>{_esc(r['name'])}</b> [{r['audience']}] — {r['gap']} · confidence {r['confidence']} · effort {r['effort']}"
+                 + (" · 🎯 focus" if r["fits_focus"] and BR_AUTO_FOCUS_WORDS else "")
                  + (" · 📊 data edge" if str(r["data_edge"]) == "True" else "") + (" · ⚠️ regulated" if r["regulated"] else ""))
         L.append(f"   evidence: {r['requests']} asks ≈ {r.get('eff_asks')} counting votes"
                  + (f" ({r.get('votes')} 👍/points)" if int(r.get('votes') or 0) else "") + f" · sources {_esc(r['sources'])}")
         L.append(f"   score {r['score']} = {_esc(r['score_parts'])}")
         L.append(f"   competition: {_esc('; '.join(comp) or 'none found')}")
+        if r.get("repos"):
+            L.append(f"   repos: {_esc(r['repos'])}")
         if r["links"]:
             L.append("   asks: " + " ".join(f'<a href="{_esc(u)}">[{n + 1}]</a>' for n, u in enumerate(str(r["links"]).split()[:3])))
         if r["reusable_code"]:
@@ -2439,15 +2445,198 @@ def main_automation():
     if weak:
         L.append("\n<i>Single signals (not evidence yet — watch only):</i> "
                  + _esc(" · ".join(r["name"][:45] for r in weak[:6])))
-    if parked:
-        L.append("\n🅿️ <b>Parked (off focus)</b>: " + _esc(" · ".join(r["name"][:40] for r in parked[:8])))
     L.append("\nBUILD = nothing exists · PACKAGE = exists, not easy · CROWDED · HARD = platform access · VENDOR-ONLY = in-app change only the maker can do · "
-             "UNPROVEN = too little evidence (needs 4+ asks from 2+ sources) · ⭐ = 3 wk + 2 sources + Medium confidence + in focus")
+             "UNPROVEN = too little evidence (needs 4+ asks from 2+ sources) · ⭐ = 3 wk + 2 sources + Medium confidence · 🎯 = matches your focus words (a boost, not a filter)")
     if verdicts:
         L.append("\n<b>Demand tests</b> (rate among people shown directly — not traffic)")
         L += [f"{'✅ BUILD' if ok else '⏳'} {_esc(line)}" for _, ok, line in verdicts]
     L.append("Licences: MIT/Apache/BSD = reuse with credit · GPL = must open your code · none = do NOT reuse.")
     send_telegram("\n".join(L))
+
+
+# ══════════════════════════════════════════════════════════════════════
+# v1.46 TOOL WATCH — weekly runner: demand signals → ready-to-copy tickets for the bizopstool team
+# ══════════════════════════════════════════════════════════════════════
+BIZOPS_SITE      = (os.environ.get("BIZOPS_SITE") or "").strip().rstrip("/")     # e.g. https://bizopstool.com
+GSC_SITE         = (os.environ.get("GSC_SITE") or "").strip()                    # Search Console property, e.g. sc-domain:bizopstool.com
+BR_TW_TICKETS    = int(os.environ.get("BR_TW_TICKETS") or 5)                      # new tickets per week
+BR_TW_MAX_OPEN   = int(os.environ.get("BR_TW_MAX_OPEN") or 8)                     # team backlog cap (tickets not yet live)
+BR_TW_WEB_CHECKS = int(os.environ.get("BR_TW_WEB_CHECKS") or 12)                  # Brave page-1 checks per week
+_SITEMAP = {}
+
+
+def tw_trends(seeds):
+    """Google Trends India, last 30 days: rising searches around each seed → ([{'query','rise','seed'}], refusals)."""
+    try:
+        from pytrends.request import TrendReq
+        pt = TrendReq(hl="en-IN", tz=330, timeout=(10, 25))
+    except Exception as exc:
+        log(f"Tool Watch: pytrends unavailable ({type(exc).__name__}) — Trends feed skipped", "WARN")
+        return [], 0
+    out, fails = [], 0
+    for seed in seeds:
+        try:
+            pt.build_payload([seed], timeframe="today 1-m", geo="IN", cat=0)
+            rq = pt.related_queries().get(seed, {}).get("rising")
+            if rq is not None and not rq.empty:
+                out += [{"query": str(q), "rise": discovery.rise_value(v), "seed": seed} for q, v in zip(rq["query"], rq["value"])]
+            time.sleep(7 + random.uniform(0, 4))
+        except Exception as exc:
+            fails += 1
+            log(f"  Trends '{seed}': {type(exc).__name__}", "WARN")
+            if fails >= 3:
+                log("Tool Watch: Google Trends is refusing requests — stopping the Trends feed early", "WARN")
+                break
+            time.sleep(20)
+    log(f"Tool Watch: Google Trends {len(out)} rising searches from {len(seeds)} seeds")
+    return out, fails
+
+
+def tw_live(slug):
+    """Is /tools/<slug> published? Page answers 200 with the tool's own words in it (not a 404 or an empty app
+    shell), or the slug is listed in sitemap.xml (covers client-rendered sites)."""
+    if not BIZOPS_SITE:
+        return False
+    if BIZOPS_SITE not in _SITEMAP:
+        try:
+            r = requests.get(f"{BIZOPS_SITE}/sitemap.xml", timeout=15, headers={"User-Agent": "bazaar-radar-check"})
+            _SITEMAP[BIZOPS_SITE] = r.text if r.status_code == 200 else ""
+        except Exception:
+            _SITEMAP[BIZOPS_SITE] = ""
+    if f"{toolwatch.SITE_PATH}{slug}" in _SITEMAP[BIZOPS_SITE] and slug:
+        return True
+    try:
+        r = requests.get(f"{BIZOPS_SITE}{toolwatch.SITE_PATH}{slug}", timeout=15, allow_redirects=True,
+                         headers={"User-Agent": "Mozilla/5.0 (compatible; bazaar-radar-check)"})
+    except Exception:
+        return False
+    if r.status_code != 200 or len(r.text) < 1500:
+        return False
+    title = re.search(r"<title[^>]*>(.*?)</title>", r.text, re.I | re.S)
+    if title and re.search(r"\b(404|not found)\b", title.group(1), re.I):
+        return False
+    words = [w for w in slug.split("-") if len(w) >= 4][:3]
+    low = r.text.lower()
+    return bool(words) and any(w in low for w in words)
+
+
+def tw_gsc(days=28):
+    """Search Console rows (page, clicks, impressions) for the last `days` days — optional; None when not set up.
+    Needs: GSC_SITE, the Search Console API enabled in the Google Cloud project, and the service-account e-mail
+    (client_email in GOOGLE_CREDS_JSON) added as a user on the Search Console property."""
+    if not (GSC_SITE and GOOGLE_CREDS_JSON):
+        return None
+    try:
+        import urllib.parse
+        from google.oauth2.service_account import Credentials
+        from google.auth.transport.requests import AuthorizedSession
+        info = json.loads(GOOGLE_CREDS_JSON)
+        creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/webmasters.readonly"])
+        sess = AuthorizedSession(creds)
+        end = datetime.now(timezone.utc).date() - timedelta(days=3)          # Search Console lags 2–3 days
+        start = end - timedelta(days=days - 1)
+        url = f"https://www.googleapis.com/webmasters/v3/sites/{urllib.parse.quote(GSC_SITE, safe='')}/searchAnalytics/query"
+        rows, start_row = [], 0
+        while True:
+            r = sess.post(url, json={"startDate": start.isoformat(), "endDate": end.isoformat(), "dimensions": ["page"],
+                                     "rowLimit": 1000, "startRow": start_row}, timeout=60)
+            if r.status_code != 200:
+                log(f"Search Console HTTP {r.status_code}: {r.text[:200]} — add {info.get('client_email', 'the service account')} "
+                    f"as a user on the property and enable the Search Console API", "WARN")
+                return None
+            batch = r.json().get("rows", [])
+            rows += batch
+            if len(batch) < 1000:
+                break
+            start_row += 1000
+        log(f"Tool Watch: Search Console {len(rows)} page rows ({start} → {end})")
+        return rows
+    except Exception as exc:
+        log_tb("Tool Watch: Search Console", exc)
+        return None
+
+
+def main_toolwatch():
+    log(f"🧰 BAZAAR RADAR — Tool Watch · {TODAY}")
+    store = Store()
+    week = toolwatch.week_start(TODAY)
+    trk = store.read("TOOL_TICKETS")
+    rows = toolwatch.clean_rows(trk.to_dict("records") if not trk.empty else [])
+    for r in rows:
+        for col in toolwatch.TICKET_COLS:
+            r.setdefault(col, "")
+    seen_df = store.read("TOOLWATCH_SEEN")
+    seen_rows = toolwatch.clean_rows(seen_df.to_dict("records") if not seen_df.empty else [])
+    # 1) what happened to earlier tickets: pages that went live, search numbers, keep/kill (all automatic)
+    gsc = tw_gsc()
+    slugs = [r["slug"] for r in rows if r.get("slug")]
+    stats = toolwatch.stats_by_slug(gsc, slugs) if gsc is not None else None
+    rows, events = toolwatch.update_tracker(rows, TODAY, live_fn=tw_live if BIZOPS_SITE else None, stats=stats)
+    # 2) the three feeds
+    raw, _fails = tw_trends(toolwatch.TREND_SEEDS)
+    seen = {r["key"]: r for r in seen_rows if r.get("key")}
+    tcands = toolwatch.trend_candidates(raw, seen, TODAY)
+    seen_rows = toolwatch.update_seen(seen_rows, tcands, TODAY)
+    opp = store.read("OPPORTUNITIES")
+    acands = toolwatch.ask_candidates(toolwatch.clean_rows(opp.to_dict("records") if not opp.empty else []), TODAY)
+    ecands = toolwatch.engine_candidates(TODAY)
+    cands = ecands + tcands + acands
+    have = {r.get("key") for r in rows}
+    # 3) score; check page-1 crowding (Brave) for the strongest new non-engine candidates only
+    pre = sorted(((toolwatch.score(c)[0], c) for c in cands if c["key"] not in have), key=lambda x: -x[0])
+    check = [c for _, c in pre if c["type"] != "engine"][:BR_TW_WEB_CHECKS]
+    web = auto_web({c["key"]: c["query"] for c in check}) if check else {}
+    for c in check:
+        w = web.get(c["key"])
+        if w:
+            c["web_pages"], c["web_examples"] = w["web_tool_pages"], w["web_examples"]
+    scored = sorted(((*toolwatch.score(c, web.get(c["key"])), c) for c in cands), key=lambda x: -x[0])
+    made, st = toolwatch.pick(scored, rows, TODAY, n=BR_TW_TICKETS, max_open=BR_TW_MAX_OPEN)
+    ids = toolwatch.next_ids(rows, TODAY, len(made))
+    all_slugs = [c["slug"] for c in ecands] + [c["slug"] for _, _, c in made if c["type"] != "engine"]
+    seller_slugs = [c["slug"] for c in ecands] + [c["slug"] for _, _, c in made if c.get("seller") and c["type"] != "engine"]
+    tickets = []
+    for (sc_, parts, c), tid in zip(made, ids):
+        tk = toolwatch.make_ticket(c, tid, TODAY, site=BIZOPS_SITE, score_val=sc_, parts=parts,
+                                   neighbours=toolwatch.neighbours_for(c, all_slugs, seller_slugs))
+        tickets.append(tk)
+        rows.append(tk["row"])
+    rules_key = f"rules:v{toolwatch.STANDING_VERSION}"
+    first_run = not any(r.get("key") == rules_key for r in rows)
+    rules = toolwatch.standing_rules(BIZOPS_SITE)
+    if first_run:
+        rows.append({**{c: "" for c in toolwatch.TICKET_COLS}, "ticket_id": "RULES", "created": TODAY, "key": rules_key,
+                     "type": "rules", "title": "Standing rules for every ticket", "status": "SENT", "text": rules})
+    resend = os.environ.get("BR_TW_RESEND") == "1"
+    again = [r for r in rows if resend and r.get("type") != "rules" and r.get("created", "") >= week and r.get("text")
+             and r["ticket_id"] not in {t["id"] for t in tickets}]
+    # 4) save first (so a Telegram hiccup can never cause duplicate or lost tickets), then send
+    store.write("TOOL_TICKETS", pd.DataFrame(rows)[toolwatch.TICKET_COLS].astype(str))
+    if seen_rows:
+        store.write("TOOLWATCH_SEEN", pd.DataFrame(seen_rows).astype(str))
+    store.write("TOOL_CANDIDATES", pd.DataFrame([{"week": week, "key": c["key"], "type": c["type"], "title": c["title"], "query": c["query"],
+                                                  "score": sc_, "why_score": parts, "ticketed": str(any(c["key"] == t["row"]["key"] for t in tickets))}
+                                                 for sc_, parts, c in scored[:60]]).astype(str))
+    pf = toolwatch.portfolio(rows, TODAY, have_site=bool(BIZOPS_SITE), have_gsc=gsc is not None)
+    nudge = toolwatch.nudge_text(rows, TODAY)
+    st.update({"events": len(toolwatch.upcoming_events(TODAY)), "trend_raw": len(raw), "trend_kept": len(tcands),
+               "asks": len(acands), "web_checked": bool(web), "cap": BR_TW_MAX_OPEN})
+    send_telegram(toolwatch.build_digest(week, made, st, pf, events, nudge, first_run))
+    if first_run:
+        send_telegram(f"<pre>{_esc(rules)}</pre>")
+    for t in tickets:
+        send_telegram(f"<pre>{_esc(t['box'])}</pre>")
+    for r in again:
+        send_telegram(f"<pre>{_esc(r['text'][:3500])}</pre>")
+    if tickets or again:
+        os.makedirs(LOCAL_OUT_DIR, exist_ok=True)
+        path = os.path.join(LOCAL_OUT_DIR, f"TOOLWATCH_{TODAY}.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(f"# Tool Watch — tickets for the bizopstool team ({TODAY})\n\n"
+                     + (f"## Standing rules\n\n```\n{rules}\n```\n\n" if first_run else "")
+                     + "\n\n---\n\n".join([t["md"] for t in tickets] + [r["text"] for r in again]) + "\n")
+        send_telegram_document(path, caption=f"Tool Watch {TODAY} — all tickets in full (same as the boxes above)")
+    log(f"Tool Watch: {len(tickets)} new tickets · {len(events)} tracker events · backlog {st['open'] + len(tickets)}/{BR_TW_MAX_OPEN}")
 
 
 INPUT_TABS = {
@@ -2498,6 +2687,8 @@ def main_estimate():
 
 
 def main():
+    if BR_MODE == "toolwatch":
+        return main_toolwatch()
     if BR_MODE == "automation":
         return main_automation()
     if BR_MODE == "discover":
@@ -2521,7 +2712,7 @@ def main():
             log(f"Backup schedule: today's data ({TODAY}) already fetched — skipping (avoids extra Amazon requests)")
             return
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.45 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.46 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()

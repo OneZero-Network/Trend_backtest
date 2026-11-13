@@ -130,6 +130,31 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.46: Tool Watch — ready-to-send tickets for the bizopstool team (automatic, weekly)
+**What it is:** a runner (`toolwatch.yml`, Mondays 14:00 IST, after the 12:00 automation report). It writes the tickets the bizopstool tech team builds from. **You copy and send; you fill in nothing.**
+
+**Three feeds, one queue** (a supermarket of tools, not one shop):
+1. **Engine tools (Wave 1, the seller aisle):** Amazon India seller profit & ROI calculator, minimum selling price calculator, RTO & return loss calculator, festival stock & promotion planner. The logic already runs in our engine; the test cases in each ticket are computed by it. `test_toolwatch.py` recalculates the real CALCULATOR workbook in LibreOffice and checks the ticket numbers equal it exactly.
+2. **Rising searches:** tool-shaped Google Trends India searches (calculator / generator / converter / checker / maker / planner / tracker / finder…), 14 seeds a week. Regulated topics (tax, GST, loans, insurance…), banned lanes and non-tools are dropped. Scored on rise, persistence (seen in 2+ weeks ×1.3), seller fit (×1.25), simple tools that AI answers and giants own (×0.6) and how crowded page 1 is (Brave, optional).
+3. **Asks:** the week's OPPORTUNITIES rows without vendor-only, platform-locked, regulated or large-build items.
+
+**What you get in Telegram (admin chat only):** a short digest, a **standing rules** box (once), then **one grey tap-to-copy box per ticket** (≤ 3,600 characters, so it never splits), plus all tickets in one `.md` file. Each ticket has: why now with numbers, who uses it, inputs/outputs, the exact formula, test cases, page title / meta description / H1 / FAQ questions, internal links to three neighbouring tools, events to track, and the keep/kill rule.
+
+**Automatic tracking (no reporting back):**
+- Set repository variable **`BIZOPS_SITE`** (e.g. `https://yourdomain`). The runner checks `/tools/<slug>` (and `sitemap.xml`) each week: a published page turns the ticket **NEW → LIVE**.
+- Set **`GSC_SITE`** (e.g. `sc-domain:yourdomain.com`) to read Search Console impressions and clicks per tool. One-time: enable the *Search Console API* in the Google Cloud project, and add the service account's e-mail (the `client_email` in `GOOGLE_CREDS_JSON`) as a user on the property.
+- 8 weeks after going live a tool is **KEEP** (≥100 impressions a week or ≥20 clicks in 28 days) or **KILL** (merge or remove). Portfolio rules: at week 8, fewer than 3 judged tools meeting the bar → change the mix; at week 16, under 1,000 search clicks in 28 days → park the lane.
+- Past the ship-by date + 7 days, the digest gives a status-check message to copy to the team.
+
+**Throttles:** `BR_TW_TICKETS` (new tickets a week, default 5), `BR_TW_MAX_OPEN` (stops adding when the team has this many unfinished tickets, default 8). Tabs: `TOOL_TICKETS` (the tracker, protected from shrink), `TOOLWATCH_SEEN` (persistence), `TOOL_CANDIDATES` (everything scored this week, with the reason). Re-send a week's tickets: run the workflow with `resend = 1`.
+
+**Also in v1.46 (automation report):**
+- Focus words are now a **boost (×1.0 vs ×0.8), not a filter**; nothing is "Parked" any more. 🎯 marks needs matching your focus words.
+- A GitHub repo counts as competition only if it is about the need's **distinctive** words (generic ones like desktop/panel/tool don't count) — the 2016 `clippy.desktop` match on a usage-stats request is gone.
+- Each need shows the **repos** its GitHub asks came from, so a label can be checked. The report header now shows `v1.46`.
+
+**Honest limits:** rising ≠ will rise (we detect early signals, we cannot predict); a new site takes weeks to rank, so calendar-known and evergreen tools beat spikes; engine-tool demand is a bet until week 8; Search Console reading is written to Google's documented API but could only be tested offline here.
+
 ## v1.45: full audit fixes (storage safety, fair pick test, honest lead test)
 - **Storage could wipe a tab.** Saving used to clear the sheet and then write; a failed write (Google returns errors now and then) left the tab empty, including HISTORY. Now it writes first and trims leftovers after, retries failed reads and writes 3 times, and **refuses to overwrite a protected tab with less than half its rows** (HISTORY, PICKS, DETAIL_HISTORY, GTRENDS_HISTORY, YT_HISTORY, SOURCING_HISTORY, DISCOVERY, AFF_POST_LOG, ASKS, OPPORTUNITIES), alerting the admin chat instead.
 - **The pick test was unfair in two directions.**

@@ -114,11 +114,33 @@ def trends_demand(rising):
 
 
 # ── supply ────────────────────────────────────────────────────────────
-def gh_supply(total_count, repos, now=None):
-    """repos: GitHub search items (sorted by stars) → supply stats."""
+GENERIC_WORDS = {"desktop", "app", "apps", "tool", "tools", "panel", "screen", "session", "sessions", "new", "feature", "support",
+                 "add", "custom", "mode", "option", "options", "button", "page", "view", "window", "bring", "back", "make",
+                 "use", "using", "get", "set", "show", "list", "file", "files", "data", "simple", "easy", "free", "online"}
+
+
+def repo_relevant(repo, words, need=2):
+    """GitHub search matches single words loosely ('desktop' → clippy.desktop). Only the need's DISTINCTIVE words
+    count (generic ones like desktop/panel/tool don't): a repo is supply when its name/description/topics contain
+    at least `need` of them (1 if the need has just one)."""
+    ws = [w.lower() for w in (words or []) if len(str(w)) >= 3]
+    key = [w for w in ws if w not in GENERIC_WORDS] or ws
+    if not key:
+        return True
+    hay = f"{repo.get('full_name', '')} {repo.get('description') or ''} {' '.join(repo.get('topics') or [])}".lower()
+    toks = set(re.findall(r"[a-z0-9]+", hay))
+    hit = sum(1 for w in key if w in toks or (len(w) >= 5 and any(t.startswith(w[:5]) for t in toks)))
+    return hit >= min(need, len(key))
+
+
+def gh_supply(total_count, repos, now=None, words=None):
+    """repos: GitHub search items (sorted by stars) → supply stats. words: the need's key words — repos that
+    are not about them are ignored (they neither count as competition nor as reusable code)."""
     now = now or datetime.now(timezone.utc)
     maint, easy, top = 0, 0, []
     for r in repos:
+        if words and not repo_relevant(r, words):
+            continue
         try:
             pushed = datetime.strptime(str(r.get("pushed_at", ""))[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
         except ValueError:
@@ -526,17 +548,18 @@ def finalize_v38(rows, groups_by_key, web, focus_words=None):
             factor *= 0.4
         if r["confidence"] == "Low":
             factor *= 0.6
+        if not r["fits_focus"]:
+            factor *= 0.8                  # v1.46: focus words are a boost, not a filter (a supermarket needs breadth)
         r["score_parts"] = (f"base {r['score']} ({r['requests']} asks, {len(str(r['sources']).split(','))} sources"
                             + (", +data edge" if str(r.get("data_edge")) == "True" else "") + f", effort {r['effort']})"
                             + (" ×0.7 regulated" if r["regulated"] else "") + (" ×0.4 web-crowded" if r["gap"] == "CROWDED" and base_gap != "CROWDED" else "")
-                            + (" ×0.6 low evidence" if r["confidence"] == "Low" else ""))
+                            + (" ×0.6 low evidence" if r["confidence"] == "Low" else "")
+                            + (" ×0.8 outside focus words" if not r["fits_focus"] else ""))
         r["score"] = round(float(r["score"]) * factor, 1)
         out.append(r)
-    out.sort(key=lambda r: (not r["fits_focus"], -r["score"]))
+    out.sort(key=lambda r: -r["score"])
     for r in out:
-        if not r["fits_focus"]:
-            r["status"] = "PARKED (off focus)"
-        elif r["status"].startswith("SHORTLIST") and (r["confidence"] == "Low" or r["gap"] not in ("BUILD", "PACKAGE")):
+        if r["status"].startswith("SHORTLIST") and (r["confidence"] == "Low" or r["gap"] not in ("BUILD", "PACKAGE")):
             r["status"] = "watch"
         if r["status"].startswith("SHORTLIST") and r["regulated"]:
             r["status"] += " · ⚠️ check tax/legal rules & liability first"

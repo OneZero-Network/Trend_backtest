@@ -2406,7 +2406,7 @@ def main_automation():
     by_src = {}
     for it in items:
         by_src[it["source"]] = by_src.get(it["source"], 0) + 1
-    L = [f"🛠 <b>What people want built</b> — week of {week} · v1.47 (admin only · for bizopstool)",
+    L = [f"🛠 <b>What people want built</b> — week of {week} · v1.48 (admin only · for bizopstool)",
          "Requests read: " + " · ".join(f"{k} {v}" for k, v in sorted(by_src.items())) + f" → {len(groups)} distinct needs"
          + (f" · focus words: {', '.join(BR_AUTO_FOCUS_WORDS)}" if BR_AUTO_FOCUS_WORDS else " · ⚠️ no focus words set (BR_AUTO_FOCUS_WORDS)")
          + ("" if BRAVE_API_KEY else " · web crowding: not checked (no BRAVE_API_KEY)")]
@@ -2494,7 +2494,9 @@ def _tw_client():
 
 
 def tw_trends(seeds):
-    """Google Trends India, last 30 days: rising searches around each seed → ([{'query','rise','seed'}], seeds lost)."""
+    """Google Trends India, last 30 days: rising searches around each seed, plus the steady TOP searches for the seller seeds
+    (rising = fast growth from a tiny base by construction; top = established demand) →
+    ([{'query','rise','seed','kind','value'}], seeds lost)."""
     pt = _tw_client()
     if pt is None:
         return [], 0
@@ -2502,35 +2504,43 @@ def tw_trends(seeds):
     for seed in seeds:
         def one(seed=seed):
             pt.build_payload([seed], timeframe="today 1-m", geo="IN", cat=0)
-            return pt.related_queries().get(seed, {}).get("rising")
+            return pt.related_queries().get(seed, {}) or {}
         ok, got = _tw_retry(one, f"'{seed}'")
         if not ok:
             lost += 1
             if lost >= 3:
                 log("Tool Watch: Google Trends keeps refusing — stopping the Trends feed for this week", "WARN")
                 break
-        elif got is not None and not getattr(got, "empty", True):
-            out += [{"query": str(q), "rise": discovery.rise_value(v), "seed": seed} for q, v in zip(got["query"], got["value"])]
+        else:
+            ris, top = got.get("rising"), got.get("top")
+            if ris is not None and not getattr(ris, "empty", True):
+                out += [{"query": str(q), "rise": discovery.rise_value(v), "seed": seed, "kind": "rising", "value": None}
+                        for q, v in zip(ris["query"], ris["value"])]
+            if seed in toolwatch.SELLER_SEEDS and top is not None and not getattr(top, "empty", True):
+                out += [{"query": str(q), "rise": 0.0, "seed": seed, "kind": "top", "value": float(v)}
+                        for q, v in zip(top["query"], top["value"])]
         time.sleep(7 + random.uniform(0, 4))
-    log(f"Tool Watch: Google Trends {len(out)} rising searches from {len(seeds)} seeds" + (f" ({lost} seed(s) lost to rate limits)" if lost else ""))
+    log(f"Tool Watch: Google Trends {sum(1 for x in out if x['kind'] == 'rising')} rising + {sum(1 for x in out if x['kind'] == 'top')} steady searches from {len(seeds)} seeds" + (f" ({lost} seed(s) lost to rate limits)" if lost else ""))
     return out, lost
 
 
-def tw_shapes(queries, anchor=None):
-    """{query[:90]: shape} — Google Trends interest over the last 90 days for each query, compared with an anchor term in
-    the same request (so volumes are comparable). Tells a real, steady search from a tiny base or a news spike."""
+def tw_shapes(queries, anchor=None, cache=None):
+    """{query[:90]: shape} — Google Trends interest over the last 90 days. Request 1 is the query ALONE (full 0–100 resolution,
+    so a spike or a trickle is visible); request 2 (only for steady curves) compares it with an anchor term for volume.
+    `cache` ({query: shape} from last week) answers without a request. Tells a real, steady search from a tiny base or a spike."""
     anchor = anchor or BR_TW_ANCHOR
-    pt = _tw_client() if queries else None
-    out, fails = {}, 0
-    if pt is None:
+    cache = cache or {}
+    uniq = list(dict.fromkeys(str(x)[:90] for x in queries))
+    need = [q for q in uniq if q not in cache and q.lower() != anchor.lower()]
+    pt = _tw_client() if need else None
+    out, fails = {q: cache[q] for q in uniq if q in cache}, 0
+    if need and pt is None:
         return out
-    for q in dict.fromkeys(str(x)[:90] for x in queries):
-        if q.lower() == anchor.lower():
-            continue
-        def one(q=q):
-            pt.build_payload([q, anchor], timeframe="today 3-m", geo="IN", cat=0)
+    for q in need:
+        def solo(q=q):
+            pt.build_payload([q], timeframe="today 3-m", geo="IN", cat=0)
             return pt.interest_over_time()
-        ok, df = _tw_retry(one, f"curve '{q[:30]}'")
+        ok, df = _tw_retry(solo, f"curve '{q[:30]}'")
         time.sleep(7 + random.uniform(0, 4))
         if not ok:
             fails += 1
@@ -2540,10 +2550,19 @@ def tw_shapes(queries, anchor=None):
             continue
         if df is None or getattr(df, "empty", True) or q not in df.columns:
             continue
-        sh = toolwatch.shape_from_series(df[q].tolist(), df[anchor].tolist() if anchor in df.columns else None)
+        sh = toolwatch.shape_from_series(df[q].tolist())
+        if sh["label"] not in ("spike", "unknown"):
+            def vs(q=q):
+                pt.build_payload([q, anchor], timeframe="today 3-m", geo="IN", cat=0)
+                return pt.interest_over_time()
+            ok2, df2 = _tw_retry(vs, f"volume '{q[:30]}'")
+            time.sleep(7 + random.uniform(0, 4))
+            if ok2 and df2 is not None and not getattr(df2, "empty", True) and q in df2.columns and anchor in df2.columns:
+                sh = toolwatch.with_volume(sh, df2[q].tolist(), df2[anchor].tolist())
         out[q] = sh
-        log(f"  curve '{q[:40]}': {sh['label']}" + (f" (rel {sh['rel']:.2f})" if sh.get("rel") is not None else ""))
-    log(f"Tool Watch: demand curves checked for {len(out)}/{len(set(str(x)[:90] for x in queries))} searches")
+        log(f"  curve '{q[:40]}': {sh['label']}" + (f" (vs anchor {sh['rel']:.3f}" if sh.get("rel") is not None else " (alone")
+            + f", last-14-days share {sh['recent_share']:.2f}, active {sh['active']:.2f})")
+    log(f"Tool Watch: demand curves {len(out)}/{len(uniq)} searches ({len(cache)} reused from last week)")
     return out
 
 
@@ -2632,20 +2651,47 @@ def main_toolwatch():
     seen = {r["key"]: r for r in seen_rows if r.get("key")}
     rejected = []
     tcands = toolwatch.trend_candidates(raw, seen, TODAY, rejected=rejected)
+    ecands = toolwatch.engine_candidates(TODAY)
+    evidence = toolwatch.engine_evidence(raw, ecands) if raw else None     # None = Trends gave nothing, so no claim either way
+    ev_q = {e["query"] for e in (evidence or [])}
+    tcands = [c for c in tcands if c["query"] not in ev_q]                 # a search that matches a Wave-1 tool is evidence for it, not a second ticket
+    for c in ecands:
+        c["evidence"] = [e for e in (evidence or []) if e["engine_key"] == c["key"]]
     seen_rows = toolwatch.update_seen(seen_rows, tcands, TODAY)
     opp = store.read("OPPORTUNITIES")
     acands = toolwatch.ask_candidates(toolwatch.clean_rows(opp.to_dict("records") if not opp.empty else []), TODAY)
-    ecands = toolwatch.engine_candidates(TODAY)
     cands = ecands + tcands + acands
     have = {r.get("key") for r in rows}
     fresh = [c for c in cands if c["key"] not in have]
     # 3) demand curves (Google Trends, 90 days vs an anchor term) for the strongest new candidates + the engine tools,
     #    because a % rise alone cannot tell a real trend from a tiny base or a news spike
+    #    Last week's curves are reused (a week does not change a 90-day curve), so the weekly request limit goes to NEW searches
+    #    and the strongest unchecked ones are not starved by the same top-10 every week.
+    cache = {}
+    prev = store.read("TOOL_CANDIDATES")
+    if not prev.empty:
+        limit = (datetime.strptime(TODAY, "%Y-%m-%d") - timedelta(days=35)).strftime("%Y-%m-%d")
+        for r in prev.to_dict("records"):
+            lab = str(r.get("shape", ""))
+            if lab in ("ok", "tiny", "spike") and str(r.get("week", "")) >= limit and str(r.get("query", "")):
+                def _f(x):
+                    try:
+                        return float(x) if str(x) not in ("", "nan", "None") else None
+                    except ValueError:
+                        return None
+                cache[str(r["query"])[:90]] = {"label": lab, "rel": _f(r.get("rel_volume")), "recent_share": _f(r.get("recent_share")),
+                                               "avg": None, "active": _f(r.get("active_days"))}
     pre = sorted(((toolwatch.score(c)[0], c) for c in fresh if c["type"] != "engine"), key=lambda x: -x[0])
-    targets = [c for _, c in pre][:BR_TW_SHAPE_CHECKS] + [c for c in fresh if c["type"] == "engine"]
-    shapes = tw_shapes([c["query"] for c in targets])
+    pre_c = [c for _, c in pre]
+    cached_c = [c for c in pre_c if c["query"][:90] in cache]
+    uncached = [c for c in pre_c if c["query"][:90] not in cache]
+    to_check = uncached[:BR_TW_SHAPE_CHECKS]
+    skipped = len(uncached) - len(to_check)
+    targets = cached_c + to_check + [c for c in fresh if c["type"] == "engine"]
+    shapes = tw_shapes([c["query"] for c in targets], cache=cache)
     for c in targets:
         c["shape"] = shapes.get(c["query"][:90])
+    refused = sum(1 for c in to_check if c["shape"] is None)
     # 4) page-1 crowding (Brave) for the best of what is left (spikes already sank in the ranking)
     pre2 = sorted(((toolwatch.score(c)[0], c) for c in fresh if c["type"] != "engine"), key=lambda x: -x[0])
     check = [c for _, c in pre2][:BR_TW_WEB_CHECKS]
@@ -2684,15 +2730,18 @@ def main_toolwatch():
                                                   "score": sc_, "why_score": parts, "shape": (c.get("shape") or {}).get("label", ""),
                                                   "rel_volume": "" if (c.get("shape") or {}).get("rel") is None else f"{c['shape']['rel']:.3f}",
                                                   "recent_share": "" if (c.get("shape") or {}).get("recent_share") is None else f"{c['shape']['recent_share']:.2f}",
+                                                  "active_days": "" if (c.get("shape") or {}).get("active") is None else f"{c['shape']['active']:.2f}",
+                                                  "kind": c.get("kind", c["type"]),
                                                   "ticketed": str(any(c["key"] == t["row"]["key"] for t in tickets))}
                                                  for sc_, parts, c in scored[:60]]).astype(str))
     pf = toolwatch.portfolio(rows, TODAY, have_site=bool(BIZOPS_SITE), have_gsc=gsc is not None)
     nudge = toolwatch.nudge_text(rows, TODAY)
-    st.update({"events": len(toolwatch.upcoming_events(TODAY)), "trend_raw": len(raw), "trend_kept": len(tcands),
-               "asks": len(acands), "web_checked": bool(web), "cap": BR_TW_MAX_OPEN})
+    st.update({"events": len(toolwatch.upcoming_events(TODAY)), "trend_raw": sum(1 for x in raw if x.get("kind", "rising") == "rising"),
+               "trend_kept": len(tcands), "asks": len(acands), "web_checked": bool(web), "cap": BR_TW_MAX_OPEN,
+               "skipped": skipped, "refused": refused, "shape_cap": BR_TW_SHAPE_CHECKS})
     made_keys = {c["key"] for _, _, c in made}
     considered = [(sc_, parts, c) for sc_, parts, c in scored if c["type"] != "engine" and c["key"] not in made_keys and c["key"] not in have][:5]
-    send_telegram(toolwatch.build_digest(week, made, st, pf, events, nudge, first_run, filtered=rejected, considered=considered))
+    send_telegram(toolwatch.build_digest(week, made, st, pf, events, nudge, first_run, filtered=rejected, considered=considered, evidence=evidence))
     if first_run:
         send_telegram(f"<pre>{_esc(rules)}</pre>")
     for t in tickets:
@@ -2783,7 +2832,7 @@ def main():
             log(f"Backup schedule: today's data ({TODAY}) already fetched — skipping (avoids extra Amazon requests)")
             return
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.47 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.48 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()

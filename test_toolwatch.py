@@ -1,4 +1,4 @@
-"""v1.46–1.47 Tool Watch: arithmetic cross-checked against the real calculator workbook (LibreOffice), calendar, feeds,
+"""v1.46–1.48 Tool Watch: arithmetic cross-checked against the real calculator workbook (LibreOffice), calendar, feeds,
 scoring, ticket text limits, tracker (live → keep/kill), portfolio rules and a full offline weekly run."""
 import glob, html, json, os, shutil, subprocess, sys, tempfile
 from datetime import datetime, timedelta, timezone
@@ -262,11 +262,14 @@ sent, docs = [], []
 tf.send_telegram = lambda m: sent.append(m)
 tf.send_telegram_document = lambda path, caption="", ctype=None: docs.append(path)
 raw_live = raw + [{"query": "murasu cyclone tracker", "rise": 193500, "seed": "tracker"},
-                  {"query": "business card maker", "rise": 700, "seed": "maker"}]
+                  {"query": "business card maker", "rise": 700, "seed": "maker"},
+                  {"query": "logo name generator", "rise": 450, "seed": "generator"},
+                  {"query": "amazon fba calculator", "rise": 0, "seed": "amazon seller", "kind": "top", "value": 80.0}]
+REAL_TW_TRENDS, REAL_TW_SHAPES = tf.tw_trends, tf.tw_shapes
 tf.tw_trends = lambda seeds: (raw_live, 0)
-shape_calls = []
-def fake_shapes(queries, anchor=None):
-    shape_calls.append(list(queries))
+shape_calls, cache_seen = [], []
+def fake_shapes(queries, anchor=None, cache=None):
+    shape_calls.append(list(queries)); cache_seen.append(dict(cache or {}))
     return {q[:90]: ({"label": "tiny", "rel": 0.004, "recent_share": 0.1, "avg": 0.5, "active": 0.2} if q.startswith("age calc") else
                      {"label": "ok", "rel": 0.2, "recent_share": 0.15, "avg": 20.0, "active": 0.9}) for q in queries}
 tf.tw_shapes = fake_shapes
@@ -283,7 +286,7 @@ run_on("2026-11-16")
 tt = pd.read_csv(os.path.join(TMP, "TOOL_TICKETS.csv"), dtype=str).fillna("")
 real = tt[tt["type"] != "rules"]
 check("week 1 (staged Wave 1): 3 engine tools + the 2 best verified rising searches, plus the rules row — and the cyclone is not one of them",
-      set(real["key"]) == {"eng:festival", "eng:profit", "eng:minprice", "q:amazon-seller-fee-calculator", "q:instagram-bio-generator"}
+      set(real["key"]) == {"eng:festival", "eng:profit", "eng:minprice", "q:business-card-maker", "q:instagram-bio-generator"}
       and (tt["type"] == "rules").sum() == 1 and not real["title"].str.contains("Cyclone").any(), list(real["key"]))
 check("demand curves were requested for the engine tools and the strongest candidates only",
       shape_calls and any("amazon india seller profit calculator" in q for q in shape_calls[0]) and not any("cyclone" in q for q in shape_calls[0]), shape_calls[:1])
@@ -293,6 +296,8 @@ check("week 1: digest + rules box + 5 ticket boxes, each within Telegram's limit
 check("week 1: digest explains how to use it and the honest limits", "tap a grey box" in sent[0] and "Honest limits" in sent[0] and "standing rules" in sent[0])
 check("week 1: digest shows what was filtered and why (cyclone = news spike, GST = regulated) and what was considered",
       "Filtered (and why)" in sent[0] and "murasu cyclone tracker" in sent[0] and "news/weather" in sent[0] and "regulated" in sent[0] and "Considered, not ticketed" in sent[0], sent[0][:900])
+check("v1.48 runner: week-1 digest shows the Google Trends evidence for the profit calculator (fba / fee calculator searches)",
+      "Demand evidence for the Wave-1 tools" in sent[0] and "amazon fba calculator" in sent[0], sent[0][:1200])
 md = open(docs[0], encoding="utf-8").read()
 check("attached file has the rules and every ticket in full", "STANDING RULES" in md and md.count("## TW-") == 5, md.count("## TW-"))
 run_on("2026-11-16")
@@ -308,8 +313,8 @@ pr = tt[tt["slug"] == "amazon-india-seller-profit-calculator"].iloc[0]
 check("week 2: the page the team published is detected as LIVE without anyone reporting it", pr["status"] == "LIVE" and pr["live_since"] == "2026-11-23")
 new2 = tt[tt["created"] == "2026-11-23"]
 check("week 2: new tickets only for what is not yet ticketed; backlog cap respected", 1 <= len(new2) <= 4 and not (set(new2["key"]) & set(real["key"])), list(new2["key"]))
-bc = new2[new2["key"] == "q:business-card-maker"]
-check("week 2: a search seen in week 1 and ticketed now says 'seen in 2 different weeks'",
+bc = new2[new2["key"] == "q:logo-name-generator"]
+check("week 2: a search seen in week 1 (not ticketed then) and ticketed now says 'seen in 2 different weeks'",
       len(bc) == 1 and "seen in 2 different weeks" in bc.iloc[0]["text"], bc["text"].tolist()[:1])
 check("week 2: the 4th engine tool (held back in week 1) is ticketed now", "eng:rto" in set(new2["key"]), list(new2["key"]))
 check("tickets carry the demand-curve line", "Demand check:" in bc.iloc[0]["text"] and "OK" in bc.iloc[0]["text"], bc.iloc[0]["text"][:300])
@@ -321,6 +326,147 @@ check("week 9: Search Console numbers in → KEEP decided automatically and repo
 cand = pd.read_csv(os.path.join(TMP, "TOOL_CANDIDATES.csv"), dtype=str)
 check("every scored candidate is saved with its score explanation and demand-curve numbers", len(cand) >= 5 and cand["why_score"].str.len().min() > 5
       and {"shape", "rel_volume", "recent_share"} <= set(cand.columns))
+
+
+# ───────────────────────── 8. v1.48 — fixes from the second live run (13 Nov)
+LIVE2 = {
+    "meri ₹80,000 salary hai. rent, kharche aur investments ka ek budget planner bana do": "a typed AI prompt, not a search",
+    "people finder us.unmask.com": "names a specific website",
+    "people finder 🔍 freepeoplesearch.com": "names a specific website",
+    "people finder": "finds private individuals",
+    "mobile number tracker": "finds private individuals",
+    "unfollow checker": "needs a social-network login",
+    "ai image generator magnific": "needs a paid AI model",
+    "music finder from video": "needs a paid AI model",
+    "moon tracker live": "needs a live data feed",
+    "moon finder": "needs a live data feed",
+}
+bad = {q: T.classify(q) for q, why in LIVE2.items() if why not in T.classify(q)}
+check("v1.48: every junk query from the live run is refused with the RIGHT plain-words reason", not bad, bad)
+OKQ = ("business card maker", "instagram bio generator", "logo name generator", "ffcs planner", "3d room planner ai",
+       "amazon seller fee calculator", "monthly budget planner", "photo resizer", "age calculator", "order tracker")
+check("v1.48: the new filters do not catch ordinary tools", all(T.classify(q) == "" for q in OKQ), {q: T.classify(q) for q in OKQ if T.classify(q)})
+
+# a junk ticket issued by an older version is withdrawn automatically, and no longer eats the weekly allowance or the backlog
+old = [{**{c: "" for c in T.TICKET_COLS}, "ticket_id": "TW-2646-05", "created": "2026-11-13", "key": "q:murasu-cyclone-tracker", "type": "search",
+        "title": "Murasu Cyclone Tracker", "query": "murasu cyclone tracker", "slug": "murasu-cyclone-tracker", "status": "NEW", "ship_by": "2026-11-27"},
+       {**{c: "" for c in T.TICKET_COLS}, "ticket_id": "TW-2646-01", "created": "2026-11-13", "key": "eng:profit", "type": "engine",
+        "title": "Profit calculator", "query": "amazon india seller profit calculator", "slug": "amazon-india-seller-profit-calculator", "status": "NEW", "ship_by": "2026-11-27"}]
+before_pick = T.pick([], old, "2026-11-13", n=5, max_open=8)[1]
+old, evw = T.update_tracker(old, "2026-11-13")
+after_pick = T.pick([], old, "2026-11-13", n=5, max_open=8)[1]
+check("v1.48: a cyclone ticket from an older version is WITHDRAWN with a message to copy to the team; the engine ticket is untouched",
+      old[0]["status"] == "WITHDRAWN" and old[1]["status"] == "NEW" and len(evw) == 1 and "do not build" in evw[0] and "TW-2646-05" in evw[0], (old[0]["status"], evw))
+check("v1.48: a withdrawn ticket frees the weekly allowance and the backlog slot, and is never ticketed again",
+      before_pick["this_week"] == 2 and after_pick["this_week"] == 1 and before_pick["open"] == 2 and after_pick["open"] == 1
+      and T.pick([(50.0, "x", {"key": "q:murasu-cyclone-tracker", "type": "search", "shape": {"label": "ok"}})], old, "2026-11-13")[0] == [], (before_pick, after_pick))
+check("v1.48: the portfolio line counts withdrawn tickets separately", "withdrawn 1" in T.portfolio(old, "2026-11-13")[0] and "Tickets 1 " in T.portfolio(old, "2026-11-13")[0], T.portfolio(old, "2026-11-13")[0])
+
+# digest says the TRUE reason for zero tickets (the live run said 'backlog is full' with 5 of 8 used)
+base = {"room": 0, "open": 5, "this_week": 5, "n": 5, "max_open": 8, "below_bar": 12, "unverified": 7, "min_score": 25}
+d_allow = T.build_digest("2026-11-09", [], base, [], [], "", False)
+d_back = T.build_digest("2026-11-09", [], {**base, "this_week": 1, "open": 8}, [], [], "", False)
+d_none = T.build_digest("2026-11-09", [], {**base, "room": 3, "this_week": 2}, [], [], "", False)
+check("v1.48: zero tickets because the weekly allowance is used → says so (and how to resend), never 'backlog is full'",
+      "allowance of 5" in d_allow and "resend" in d_allow and "backlog is full" not in d_allow, d_allow[:400])
+check("v1.48: zero tickets because the team has too many open → says that; otherwise 'nothing cleared the filters'",
+      "already has 8 unfinished" in d_back and "nothing new cleared" in d_none)
+d_sk = T.build_digest("2026-11-09", [], {**base, "skipped": 7, "refused": 2, "shape_cap": 10}, [], [], "", False)
+check("v1.48: 'not checked (limit)' and 'Google Trends refused' are different messages",
+      "7 searches not curve-checked" in d_sk and "limit 10" in d_sk and "2 searches could not be checked because Google Trends refused" in d_sk and "(Google Trends refused) — never" not in d_sk, d_sk)
+filt = [{"query": q, "rise": 99999, "reason": "news/weather event — spikes die in days", "kind": "rising"} for q in ("murasu cyclone tracker", "cyclone murasu tracker live", "cyclone arnab tracker")] \
+    + [{"query": "people finder x.com", "rise": 400, "reason": "names a specific website", "kind": "rising"}]
+d_f = T.build_digest("2026-11-09", [], base, [], [], "", False, filtered=filt)
+check("v1.48: filtered reasons are grouped with a count, so 3 cyclone variants do not crowd out everything else",
+      "news/weather event — spikes die in days ×3" in d_f and "names a specific website ×1" in d_f, d_f[-500:])
+
+# demand curve: the SHAPE comes from the query alone; the anchor only demotes a steady curve
+steady = [10, 12, 9, 11] * 23
+solo_steady = T.shape_from_series(steady)
+check("v1.48: a steady query on its own is ok; volume next to a huge anchor can only demote it to tiny",
+      solo_steady["label"] == "ok" and T.with_volume(solo_steady, steady, [4000] * 92)["label"] == "tiny" and T.with_volume(solo_steady, steady, [30] * 92)["label"] == "ok")
+check("v1.48: a query searched on only a few days of the 90 is not steady demand (tiny), and a late burst is a spike",
+      T.shape_from_series([0] * 60 + [100] + [0] * 29)["label"] == "tiny" and T.shape_from_series([0] * 70 + [5] * 20)["label"] == "spike")
+check("v1.48: the demand note copes with a cached shape that has no 'active' number", "tiny" in T.shape_note({"label": "tiny", "rel": 0.001, "recent_share": 0.2, "active": None}, "x").lower())
+
+# steady "top" searches + demand evidence for the Wave-1 tools
+rawt = [{"query": "amazon fba calculator", "rise": 0, "seed": "amazon seller", "kind": "top", "value": 80.0},
+        {"query": "meesho margin calculator", "rise": 0, "seed": "meesho seller", "kind": "top", "value": 55.0},
+        {"query": "rto charges calculator", "rise": 0, "seed": "flipkart seller", "kind": "top", "value": 40.0},
+        {"query": "amazon seller central login", "rise": 0, "seed": "amazon seller", "kind": "top", "value": 100.0},
+        {"query": "gst calculator", "rise": 0, "seed": "amazon seller", "kind": "top", "value": 90.0},
+        {"query": "product photo resizer", "rise": 0, "seed": "online selling", "kind": "top", "value": 60.0}]
+ct = {c["key"]: c for c in T.trend_candidates(rawt, {}, "2026-11-16")}
+check("v1.48: top searches become candidates (kind top, seller aisle) — login/regulated ones do not",
+      set(ct) == {"q:amazon-fba-calculator", "q:meesho-margin-calculator", "q:rto-charges-calculator", "q:product-photo-resizer"}
+      and all(c["kind"] == "top" and c["seller"] for c in ct.values()), sorted(ct))
+sc_top = T.score({**ct["q:product-photo-resizer"], "shape": {"label": "ok"}}, {"web_tool_pages": 2})
+check("v1.48: a steady top search is scored on its steadiness (not a % rise), and says so", sc_top[0] >= 25 and "steady top search" in sc_top[1], sc_top)
+ev = T.engine_evidence(rawt, T.engine_candidates("2026-11-16"))
+check("v1.48: top searches that match a Wave-1 tool are EVIDENCE for it (profit, margin → profit calculator; RTO → RTO tool) and not seller-less noise",
+      {(e["engine_key"], e["query"]) for e in ev} == {("eng:profit", "amazon fba calculator"), ("eng:profit", "meesho margin calculator"), ("eng:rto", "rto charges calculator")}, ev)
+d_ev = T.build_digest("2026-11-16", [], base, [], [], "", False, evidence=ev)
+d_ev0 = T.build_digest("2026-11-16", [], base, [], [], "", False, evidence=[])
+check("v1.48: digest shows the demand evidence, or says plainly there is none (and says nothing if Trends returned nothing)",
+      "Demand evidence for the Wave-1 tools" in d_ev and "amazon fba calculator" in d_ev and "still unmeasured" in d_ev0
+      and "evidence" not in T.build_digest("2026-11-16", [], base, [], [], "", False, evidence=None).lower())
+tkt = T.make_ticket({**ct["q:product-photo-resizer"], "shape": {"label": "ok", "rel": 0.1, "recent_share": 0.1, "active": 0.9}}, "TW-2647-01", "2026-11-16", score_val=40, parts="p")
+check("v1.48: a steady-search ticket says 'top related search … established, steady demand' (not 'rising +0%')",
+      "top related search" in tkt["box"] and "rising +0%" not in tkt["box"] and "Steady search" in tkt["box"], tkt["box"][:500])
+eng_c = T.engine_candidates("2026-11-16")
+eng_c[0]["evidence"] = [{"query": "amazon fba calculator", "kind": "top", "seed": "amazon seller"}]
+check("v1.48: engine ticket carries the Google Trends evidence line when there is some",
+      "is a top search for \"amazon seller\"" in T.make_ticket(eng_c[0], "TW-2647-02", "2026-11-16", score_val=90, parts="p")["box"])
+
+# the runner: curves reused from last week, evidence digest line, search that matches an engine tool is not a second ticket
+check("v1.48 runner: Google Trends searches that match a Wave-1 tool did not become tickets (evidence instead)",
+      "q:amazon-fba-calculator" not in set(real["key"]) and "q:amazon-seller-fee-calculator" not in set(real["key"]))
+check("v1.48 runner: curves from last week's TOOL_CANDIDATES are reused instead of asked for again", any(len(c) > 0 for c in cache_seen[1:]), [len(c) for c in cache_seen])
+
+# network helpers against a fake Google Trends client (no network)
+import types
+class FakeFrame:
+    def __init__(self, cols): self.cols, self.empty = cols, False
+    def __getitem__(self, k): return types.SimpleNamespace(tolist=lambda: self.cols[k])
+    @property
+    def columns(self): return list(self.cols)
+class FakePT:
+    def __init__(self): self.calls, self.kw = [], []
+    def build_payload(self, kw, **k): self.kw = list(kw); self.calls.append(list(kw))
+    def interest_over_time(self):
+        if len(self.kw) == 1:
+            q = self.kw[0]
+            vals = [0] * 76 + [50] * 14 if q == "burst" else steady
+            return FakeFrame({q: vals})
+        return FakeFrame({self.kw[0]: steady, self.kw[1]: [4000] * 92})
+pt = FakePT()
+orig_client, orig_sleep = tf._tw_client, tf.time.sleep
+tf._tw_client, tf.time.sleep = (lambda: pt), (lambda x: None)
+try:
+    got = REAL_TW_SHAPES(["burst", "steady one", "burst"], anchor="image compressor")
+    calls1 = list(pt.calls)
+    got2 = REAL_TW_SHAPES(["burst", "steady one"], anchor="image compressor", cache=got)
+finally:
+    tf._tw_client, tf.time.sleep = orig_client, orig_sleep
+check("v1.48 runner: each curve is a request for the query ALONE; a volume comparison follows only for steady curves",
+      calls1 == [["burst"], ["steady one"], ["steady one", "image compressor"]], calls1)
+check("v1.48 runner: a spike is labelled spike, a steady query next to a huge anchor is tiny, and a full cache makes zero requests",
+      got["burst"]["label"] == "spike" and got["steady one"]["label"] == "tiny" and got["steady one"]["rel"] is not None and got2 == got and len(pt.calls) == 3, (got, len(pt.calls)))
+class FakeDF:
+    empty = False
+    def __init__(self, rows): self.rows = rows
+    def __getitem__(self, k): return [r[0] if k == "query" else r[1] for r in self.rows]
+class FakePT2:
+    def build_payload(self, kw, **k): self.seed = kw[0]
+    def related_queries(self): return {self.seed: {"rising": FakeDF([(f"{self.seed} calc", "+400%")]), "top": FakeDF([(f"{self.seed} maker", 70)])}}
+orig_client, orig_sleep = tf._tw_client, tf.time.sleep
+tf._tw_client, tf.time.sleep = (lambda: FakePT2()), (lambda x: None)
+try:
+    rows_t, lost_t = REAL_TW_TRENDS(["calculator", "amazon seller"])
+finally:
+    tf._tw_client, tf.time.sleep = orig_client, orig_sleep
+check("v1.48 runner: rising searches for every seed, steady TOP searches only for the seller seeds",
+      sorted((r["query"], r["kind"]) for r in rows_t) == [("amazon seller calc", "rising"), ("amazon seller maker", "top"), ("calculator calc", "rising")], rows_t)
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED"); sys.exit(1 if FAILS else 0)

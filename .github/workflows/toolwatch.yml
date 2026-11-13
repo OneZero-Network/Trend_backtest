@@ -41,6 +41,10 @@ jobs:
           GSC_SITE:           ${{ vars.GSC_SITE }}                  # optional: Search Console property → impressions + keep/kill automatic
           BR_TW_TICKETS:      ${{ vars.BR_TW_TICKETS || '5' }}      # new tickets per week
           BR_TW_MAX_OPEN:     ${{ vars.BR_TW_MAX_OPEN || '8' }}     # team backlog cap
+          BR_TW_MIN_SCORE:    ${{ vars.BR_TW_MIN_SCORE }}           # optional: quality bar for searched tickets (default 25)
+          BR_TW_ANCHOR:       ${{ vars.BR_TW_ANCHOR }}              # optional: term every search is compared with (default "image compressor")
+          BR_TW_TINY_REL:     ${{ vars.BR_TW_TINY_REL }}            # optional: below this share of the anchor = tiny (default 0.02)
+          BR_TW_SPIKE_SHARE:  ${{ vars.BR_TW_SPIKE_SHARE }}         # optional: share of interest in last 14 days = spike (default 0.6)
           BR_TW_RESEND:       ${{ inputs.resend }}
         run: python trend_fetcher.py
       - name: Keep the tickets file

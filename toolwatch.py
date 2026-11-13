@@ -173,7 +173,10 @@ NOUN_GROUP = {"calculator": "calculator", "estimator": "calculator", "simulator"
               "formatter": "file", "compressor": "file", "resizer": "file", "splitter": "file", "merger": "file",
               "template": "template"}
 NOUN_SEEDS = ["calculator", "generator", "converter", "checker", "maker", "planner", "tracker", "finder"]
-SELLER_SEEDS = ["amazon seller", "flipkart seller", "meesho seller", "dropshipping", "reselling", "online selling"]
+# v1.49: the old seeds ("amazon seller", "reselling"…) returned navigational searches (login, central, registration): 99 steady searches,
+# none tool-shaped. A seed that already carries a tool word makes the related-search lists tool-shaped by construction.
+SELLER_SEEDS = ["amazon seller calculator", "flipkart seller calculator", "meesho seller tools", "product title generator",
+                "product description generator", "barcode generator", "product photo resizer", "shipping cost calculator"]
 TREND_SEEDS = NOUN_SEEDS + SELLER_SEEDS
 NOT_TOOL = re.compile(r"\b(login|log in|sign ?in|download|apk|near me|status|result|results|today|live|news|"
                       r"release date|customer care|contact|number|app|movie|song|lyrics|cricket|ipl|job|jobs|"
@@ -348,6 +351,10 @@ def update_seen(seen_rows, cands, today):
     return [r for r in by.values() if str(r.get("last_seen", "9999")) >= cutoff]
 
 
+DEV_TOPIC = re.compile(r"\b(library|libraries|framework|sdk|authentication|blazor|react|angular|django|laravel|kubernetes|docker|"
+                       r"sanitiz\w+|middleware|microservices?|devops|terraform)\b", re.I)
+
+
 def ask_candidates(opp_rows, today, limit=3):
     """OPPORTUNITIES rows of the latest week → small, buildable, non-vendor, non-regulated asks."""
     if not opp_rows:
@@ -362,7 +369,7 @@ def ask_candidates(opp_rows, today, limit=3):
         if str(r.get("effort", "M")) == "L":
             continue
         name = str(r.get("name") or r.get("problem") or "").strip()
-        if not name or discovery.BANNED.search(name):
+        if not name or discovery.BANNED.search(name) or DEV_TOPIC.search(name):      # code questions are not tools people search for
             continue
         noun = tool_noun(name) or "tool"
         out.append({"key": "a:" + canon_key(name)[:60], "type": "ask", "title": nice_title(name)[:70], "query": name.lower()[:80],
@@ -498,7 +505,10 @@ def engine_candidates(today):
                    "4) " + _phase_line("Makar Sankranti/Lohri/Pongal", "2027-01-13")],
          "pages": [f"/tools/festival-stock-planner-india/{slugify(p['event'].split('/')[0])}-{p['date'][:4]} — {p['date']}: "
                    f"stock {p['stock_from']}→{p['stock_until']} · promote {p['promote_from']}→{p['promote_until']} · live by "
-                   f"{(_d(p['promote_from']) - timedelta(days=7)).isoformat()} · today: {PHASE_SHORT[p['phase']]}" for p in events],
+                   f"{(_d(p['promote_from']) - timedelta(days=7)).isoformat()} · today: {PHASE_SHORT[p['phase']]} · "
+                   + ("SEO: enough lead time to rank" if (_d(p['promote_from']) - t).days >= 56 else
+                      "SEO: under 8 weeks to the promote window — Google will not rank it in time; serves the channel, keep it for next year")
+                   for p in events],
          "faq_extra": "When should I order stock for Diwali / Rakhi / Holi?", "next": "Check the margin first in the profit calculator.",
          "urgent": bool(events and (_d(events[0]["promote_from"]) - t).days <= 35)},
     ]
@@ -557,6 +567,8 @@ def with_volume(sh, q_vals, anchor_vals, tiny_rel=None):
 def shape_note(sh, anchor="the anchor term"):
     if not sh or sh.get("label") == "unknown":
         return "search volume NOT verified (Google Trends comparison unavailable this week)"
+    if sh.get("nodata") or (sh.get("label") == "tiny" and sh.get("rel") is None and sh.get("recent_share") is None):
+        return "90-day demand curve: TINY — Google Trends has no data for it (too few searches to chart)"
     rel = f"{sh['rel']:.1%} of '{anchor}'" if sh.get("rel") is not None else "volume vs anchor n/a"
     rs = f"{sh['recent_share']:.0%}" if sh.get("recent_share") is not None else "n/a"
     ac = f", searched on {sh['active']:.0%} of days" if sh.get("active") is not None else ""
@@ -688,30 +700,96 @@ def meta_desc(title, what):
     return s[:155].rstrip()
 
 
-def fit(sections, limit=BOX_LIMIT):
-    """sections: [(name, lines, droppable_rank)] → text ≤ limit once HTML-escaped. Rank 0 = never dropped; the
-    highest rank goes first. If anything is dropped a pointer to the attached file is added."""
-    def render(secs, note=False):
+PART_MARK = "\n=====PART=====\n"
+
+
+def _elen(x):
+    return len(html.escape(x))
+
+
+def fit(sections, limit=BOX_LIMIT, min_rank=1, hard=True):
+    """sections: [(name, lines, droppable_rank)] → text ≤ limit once HTML-escaped. Rank 0 = never dropped; the highest rank goes
+    first, and only sections with rank ≥ min_rank may go. The note names what was left out. hard=False → None when it cannot fit."""
+    def render(secs, dropped=()):
         out = []
         for name, lines, _ in secs:
             if name:
                 out.append(name)
             out += lines
             out.append("")
-        if note:
-            out.append("… more in the attached file (and the TOOL_TICKETS tab)")
+        if dropped:
+            out.append("… not in this box (full ticket in the attached file): " + ", ".join(dropped))
         return "\n".join(out).rstrip()
-    secs, dropped = list(sections), False
-    while len(html.escape(render(secs, dropped))) > limit:
-        cand = [i for i, x in enumerate(secs) if x[2] > 0]
+    secs, dropped = list(sections), []
+    while _elen(render(secs, dropped)) > limit:
+        cand = [i for i, x in enumerate(secs) if x[2] >= min_rank and x[2] > 0]
         if not cand:
+            if not hard:
+                return None
             break
-        secs.pop(max(cand, key=lambda i: secs[i][2]))
-        dropped = True
+        gone = secs.pop(max(cand, key=lambda i: secs[i][2]))
+        dropped.append(gone[0].split(" — ")[0].split(" (")[0].title() if gone[0] else "a section")
     text = render(secs, dropped)
-    if len(html.escape(text)) > limit:               # pathological: hard cut
+    if _elen(text) > limit:                          # pathological: hard cut
         text = text[: limit - 60] + "\n… (full text in the attached file)"
     return text
+
+
+def pack(blocks, limit=BOX_LIMIT, label=""):
+    """Lossless split for text too long for one Telegram message: blocks (sections) are kept whole where they fit, packed
+    into parts ≤ limit once escaped, each part says 'part i/n — send all'. Nothing is ever cut off silently."""
+    room = limit - 130
+    pieces = []
+    for b in blocks:
+        if not str(b).strip():
+            continue
+        if _elen(b) <= room:
+            pieces.append(b)
+            continue
+        cur = ""
+        for line in str(b).split("\n"):
+            while _elen(line) > room:
+                cut = room
+                while _elen(line[:cut]) > room and cut > 40:
+                    cut -= 40
+                sp = line.rfind(" ", 0, cut)
+                cut = sp if sp > cut // 2 else cut
+                if cur:
+                    pieces.append(cur)
+                    cur = ""
+                pieces.append(line[:cut])
+                line = line[cut:].lstrip()
+            trial = (cur + "\n" + line) if cur else line
+            if cur and _elen(trial) > room:
+                pieces.append(cur)
+                cur = line
+            else:
+                cur = trial
+        if cur:
+            pieces.append(cur)
+    parts, cur = [], ""
+    for pc in pieces:
+        trial = (cur + "\n\n" + pc) if cur else pc
+        if cur and _elen(trial) > room:
+            parts.append(cur)
+            cur = pc
+        else:
+            cur = trial
+    if cur:
+        parts.append(cur)
+    n = len(parts)
+    if n > 1:
+        parts = [f"{label + ' · ' if label else ''}part {i}/{n} — send all {n} parts, in order\n\n{x}" for i, x in enumerate(parts, 1)]
+    return parts
+
+
+def ticket_parts(sections, label=""):
+    """One box when it fits after dropping only what the standing rules already say (TRACK, KEEP / KILL) and our own SCORE line;
+    otherwise EVERY section, split into parts — the team never receives half a ticket."""
+    one = fit(sections, BOX_LIMIT, min_rank=7, hard=False)
+    if one is not None:
+        return [one]
+    return pack(["\n".join(([name] if name else []) + list(lines)) for name, lines, _ in sections], BOX_LIMIT, label)
 
 
 def make_ticket(c, tid, today, site="", neighbours=None, score_val=0.0, parts=""):
@@ -782,7 +860,7 @@ def make_ticket(c, tid, today, site="", neighbours=None, score_val=0.0, parts=""
         sections.append(("EVENT PAGES TO PUBLISH", c["pages"], 3))
     sections += [("PAGE", page, 2), ("LINKS", links, 6), ("TRACK", track, 8), ("KEEP / KILL", judge, 7),
                  ("SCORE", [parts], 9)]
-    box = fit([("", head, 0)] + sections)
+    parts_box = ticket_parts([("", head, 0)] + sections, tid)
     md_lines = [f"## {tid} — {c['title']}", "", f"- {head[0]}"] + [f"- **{x.split(':', 1)[0]}**:{x.split(':', 1)[1]}" if ":" in x[:22] else f"- {x}" for x in head[2:]]
     for name, lines, _ in sections:
         md_lines += ["", f"**{name}**"] + [f"- {l.strip()}" for l in lines if l.strip()]
@@ -790,8 +868,8 @@ def make_ticket(c, tid, today, site="", neighbours=None, score_val=0.0, parts=""
     row = {"ticket_id": tid, "created": t.isoformat(), "key": c["key"], "type": c["type"], "title": c["title"],
            "query": c["query"], "slug": slug, "score": f"{score_val:.1f}", "status": "NEW", "ship_by": ship_by.isoformat(),
            "live_since": "", "judge_on": "", "impressions_28d": "", "clicks_28d": "", "decision": "", "notes": "",
-           "text": md[:45000]}
-    return {"id": tid, "box": box, "md": md, "row": row, "url": url}
+           "text": md[:45000], "box": PART_MARK.join(parts_box)}
+    return {"id": tid, "box": parts_box[0], "parts": parts_box, "md": md, "row": row, "url": url}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -823,7 +901,7 @@ def standing_rules(site=""):
 # 7. Tracker: live detection, search stats, keep/kill, portfolio rules
 # ══════════════════════════════════════════════════════════════════════
 TICKET_COLS = ["ticket_id", "created", "key", "type", "title", "query", "slug", "score", "status", "ship_by",
-               "live_since", "judge_on", "impressions_28d", "clicks_28d", "decision", "notes", "text"]
+               "live_since", "judge_on", "impressions_28d", "clicks_28d", "decision", "notes", "text", "box"]
 
 
 def update_tracker(rows, today, live_fn=None, stats=None):

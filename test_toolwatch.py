@@ -1,4 +1,4 @@
-"""v1.46–1.48 Tool Watch: arithmetic cross-checked against the real calculator workbook (LibreOffice), calendar, feeds,
+"""v1.46–1.49 Tool Watch: arithmetic cross-checked against the real calculator workbook (LibreOffice), calendar, feeds,
 scoring, ticket text limits, tracker (live → keep/kill), portfolio rules and a full offline weekly run."""
 import glob, html, json, os, shutil, subprocess, sys, tempfile
 from datetime import datetime, timedelta, timezone
@@ -100,7 +100,7 @@ check("sports / election spikes filtered", all(T.classify(q) for q in ("t20 worl
 check("evergreen look-alikes still pass (budget planner, rainwater harvesting calculator)",
       T.classify("monthly budget planner") == "" and T.classify("rainwater harvesting calculator") == "")
 check("canonical key drops noise words", T.canon_key("Free Online EMI Calculator India 2026") == "emi-calculator")
-raw = [{"query": "amazon seller fee calculator", "rise": "+900%", "seed": "amazon seller"},
+raw = [{"query": "amazon seller fee calculator", "rise": "+900%", "seed": "amazon seller calculator"},
        {"query": "Amazon Seller Fee Calculator India", "rise": 400, "seed": "calculator"},
        {"query": "instagram bio generator", "rise": "Breakout", "seed": "generator"},
        {"query": "age calculator", "rise": 3000, "seed": "calculator"},
@@ -210,8 +210,8 @@ for i, c in enumerate(eng):
     s, parts = T.score(c)
     tk = T.make_ticket(c, f"TW-2646-0{i + 1}", "2026-11-13", site="https://bizopstool.example", neighbours=T.neighbours_for(c, slugs, slugs), score_val=s, parts=parts)
     boxes.append(tk)
-check("every engine ticket fits one Telegram message (escaped ≤ 3,600 chars)", all(len(html.escape(t["box"])) <= T.BOX_LIMIT for t in boxes), [len(html.escape(t["box"])) for t in boxes])
-check("engine tickets keep formula + test cases even when trimmed", all("TEST CASES" in t["box"] and "EXACT FORMULA" in t["box"] for t in boxes))
+check("every part of every engine ticket fits one Telegram message (escaped ≤ 3,600 chars)", all(len(html.escape(x)) <= T.BOX_LIMIT for t in boxes for x in t["parts"]), [[len(html.escape(x)) for x in t["parts"]] for t in boxes])
+check("engine tickets keep formula + test cases (and, when long, everything else) across their parts", all("TEST CASES" in "\n".join(t["parts"]) and "EXACT FORMULA" in "\n".join(t["parts"]) and "LINKS" in "\n".join(t["parts"]) for t in boxes))
 check("full text (file / sheet) always has everything", all("Link TO" in t["md"] and "KEEP if" in t["md"] and "Events:" in t["md"] for t in boxes))
 check("ticket states ID, build path, target search, ship-by date", all(x in boxes[0]["box"] for x in ("TW-2646-01", "/tools/amazon-india-seller-profit-calculator", "Target search:", "Ship by: 2026-11-27")))
 check("negative margin/ROI use the same proper minus as the rupee figures", "margin −18.7%" in boxes[0]["md"] + boxes[1]["md"] + boxes[2]["md"] + boxes[3]["md"]
@@ -264,7 +264,7 @@ tf.send_telegram_document = lambda path, caption="", ctype=None: docs.append(pat
 raw_live = raw + [{"query": "murasu cyclone tracker", "rise": 193500, "seed": "tracker"},
                   {"query": "business card maker", "rise": 700, "seed": "maker"},
                   {"query": "logo name generator", "rise": 450, "seed": "generator"},
-                  {"query": "amazon fba calculator", "rise": 0, "seed": "amazon seller", "kind": "top", "value": 80.0}]
+                  {"query": "amazon fba calculator", "rise": 0, "seed": "amazon seller calculator", "kind": "top", "value": 80.0}]
 REAL_TW_TRENDS, REAL_TW_SHAPES = tf.tw_trends, tf.tw_shapes
 tf.tw_trends = lambda seeds: (raw_live, 0)
 shape_calls, cache_seen = [], []
@@ -291,8 +291,9 @@ check("week 1 (staged Wave 1): 3 engine tools + the 2 best verified rising searc
 check("demand curves were requested for the engine tools and the strongest candidates only",
       shape_calls and any("amazon india seller profit calculator" in q for q in shape_calls[0]) and not any("cyclone" in q for q in shape_calls[0]), shape_calls[:1])
 boxes_sent = [m for m in sent if m.startswith("<pre>")]
-check("week 1: digest + rules box + 5 ticket boxes, each within Telegram's limit, one file attached",
-      len(sent) == 7 and len(boxes_sent) == 6 and all(len(m) < 4096 for m in sent) and len(docs) == 1 and docs[0].endswith(".md"), (len(sent), len(docs)))
+n_parts = sum(len(b.split(T.PART_MARK)) for b in real["box"])
+check("week 1: digest + rules box + every part of the 5 tickets (long ones in 2 parts), each within Telegram's limit, one file attached",
+      len(sent) == 2 + n_parts and n_parts >= 5 and len(boxes_sent) == 1 + n_parts and all(len(m) < 4096 for m in sent) and len(docs) == 1 and docs[0].endswith(".md"), (len(sent), n_parts, len(docs)))
 check("week 1: digest explains how to use it and the honest limits", "tap a grey box" in sent[0] and "Honest limits" in sent[0] and "standing rules" in sent[0])
 check("week 1: digest shows what was filtered and why (cyclone = news spike, GST = regulated) and what was considered",
       "Filtered (and why)" in sent[0] and "murasu cyclone tracker" in sent[0] and "news/weather" in sent[0] and "regulated" in sent[0] and "Considered, not ticketed" in sent[0], sent[0][:900])
@@ -304,7 +305,21 @@ run_on("2026-11-16")
 check("same week, run again: no new tickets, no rules box, no file", len(pd.read_csv(os.path.join(TMP, "TOOL_TICKETS.csv"))) == 6
       and len(sent) == 1 and not docs and "No new tickets" in sent[0], (len(sent), sent[0][:200]))
 os.environ["BR_TW_RESEND"] = "1"; run_on("2026-11-16"); os.environ["BR_TW_RESEND"] = ""
-check("resend flag sends this week's tickets again", len([m for m in sent if m.startswith("<pre>")]) == 5 and len(docs) == 1, len(sent))
+check("resend flag sends this week's tickets again — every part of every ticket, complete",
+      len([m for m in sent if m.startswith("<pre>")]) == n_parts and len(docs) == 1, (len(sent), n_parts))
+resent = "\n".join(m for m in sent if m.startswith("<pre>"))
+check("resend: the sections the old resend cut off (LINKS, KEEP / KILL, SCORE) are all there for every ticket",
+      all(resent.count(x) >= 5 for x in ("LINKS", "KEEP / KILL", "SCORE")), [resent.count(x) for x in ("LINKS", "KEEP / KILL", "SCORE")])
+# an older-version junk ticket is in this week's rows (status NEW). Resend must withdraw it, say so, and NOT send it again.
+tt0 = pd.read_csv(os.path.join(TMP, "TOOL_TICKETS.csv"), dtype=str).fillna("")
+junk_row = {c: "" for c in tt0.columns}
+junk_row.update({"ticket_id": "TW-2647-99", "created": "2026-11-16", "key": "q:murasu-cyclone-tracker", "type": "search", "title": "Murasu Cyclone Tracker",
+                 "query": "murasu cyclone tracker", "slug": "murasu-cyclone-tracker", "status": "NEW", "ship_by": "2026-11-30", "text": "## junk ticket body"})
+pd.concat([tt0, pd.DataFrame([junk_row])], ignore_index=True).to_csv(os.path.join(TMP, "TOOL_TICKETS.csv"), index=False)
+os.environ["BR_TW_RESEND"] = "1"; run_on("2026-11-16"); os.environ["BR_TW_RESEND"] = ""
+check("v1.49: resend withdraws the old junk ticket, announces it, and never sends it again",
+      "WITHDRAWN TW-2647-99" in sent[0] and not any("junk ticket body" in m or "Murasu Cyclone" in m for m in sent[1:])
+      and pd.read_csv(os.path.join(TMP, "TOOL_TICKETS.csv"), dtype=str).fillna("").set_index("ticket_id").loc["TW-2647-99", "status"] == "WITHDRAWN", sent[0][:300])
 tf.BIZOPS_SITE = "https://x.test"
 tf.tw_live = lambda slug: slug == "amazon-india-seller-profit-calculator"
 run_on("2026-11-23")
@@ -390,12 +405,12 @@ check("v1.48: a query searched on only a few days of the 90 is not steady demand
 check("v1.48: the demand note copes with a cached shape that has no 'active' number", "tiny" in T.shape_note({"label": "tiny", "rel": 0.001, "recent_share": 0.2, "active": None}, "x").lower())
 
 # steady "top" searches + demand evidence for the Wave-1 tools
-rawt = [{"query": "amazon fba calculator", "rise": 0, "seed": "amazon seller", "kind": "top", "value": 80.0},
-        {"query": "meesho margin calculator", "rise": 0, "seed": "meesho seller", "kind": "top", "value": 55.0},
-        {"query": "rto charges calculator", "rise": 0, "seed": "flipkart seller", "kind": "top", "value": 40.0},
-        {"query": "amazon seller central login", "rise": 0, "seed": "amazon seller", "kind": "top", "value": 100.0},
-        {"query": "gst calculator", "rise": 0, "seed": "amazon seller", "kind": "top", "value": 90.0},
-        {"query": "product photo resizer", "rise": 0, "seed": "online selling", "kind": "top", "value": 60.0}]
+rawt = [{"query": "amazon fba calculator", "rise": 0, "seed": "amazon seller calculator", "kind": "top", "value": 80.0},
+        {"query": "meesho margin calculator", "rise": 0, "seed": "meesho seller tools", "kind": "top", "value": 55.0},
+        {"query": "rto charges calculator", "rise": 0, "seed": "flipkart seller calculator", "kind": "top", "value": 40.0},
+        {"query": "amazon seller central login", "rise": 0, "seed": "amazon seller calculator", "kind": "top", "value": 100.0},
+        {"query": "gst calculator", "rise": 0, "seed": "amazon seller calculator", "kind": "top", "value": 90.0},
+        {"query": "product photo resizer", "rise": 0, "seed": "product photo resizer", "kind": "top", "value": 60.0}]
 ct = {c["key"]: c for c in T.trend_candidates(rawt, {}, "2026-11-16")}
 check("v1.48: top searches become candidates (kind top, seller aisle) — login/regulated ones do not",
       set(ct) == {"q:amazon-fba-calculator", "q:meesho-margin-calculator", "q:rto-charges-calculator", "q:product-photo-resizer"}
@@ -414,9 +429,9 @@ tkt = T.make_ticket({**ct["q:product-photo-resizer"], "shape": {"label": "ok", "
 check("v1.48: a steady-search ticket says 'top related search … established, steady demand' (not 'rising +0%')",
       "top related search" in tkt["box"] and "rising +0%" not in tkt["box"] and "Steady search" in tkt["box"], tkt["box"][:500])
 eng_c = T.engine_candidates("2026-11-16")
-eng_c[0]["evidence"] = [{"query": "amazon fba calculator", "kind": "top", "seed": "amazon seller"}]
+eng_c[0]["evidence"] = [{"query": "amazon fba calculator", "kind": "top", "seed": "amazon seller calculator"}]
 check("v1.48: engine ticket carries the Google Trends evidence line when there is some",
-      "is a top search for \"amazon seller\"" in T.make_ticket(eng_c[0], "TW-2647-02", "2026-11-16", score_val=90, parts="p")["box"])
+      "is a top search for \"amazon seller calculator\"" in T.make_ticket(eng_c[0], "TW-2647-02", "2026-11-16", score_val=90, parts="p")["box"])
 
 # the runner: curves reused from last week, evidence digest line, search that matches an engine tool is not a second ticket
 check("v1.48 runner: Google Trends searches that match a Wave-1 tool did not become tickets (evidence instead)",
@@ -462,11 +477,79 @@ class FakePT2:
 orig_client, orig_sleep = tf._tw_client, tf.time.sleep
 tf._tw_client, tf.time.sleep = (lambda: FakePT2()), (lambda x: None)
 try:
-    rows_t, lost_t = REAL_TW_TRENDS(["calculator", "amazon seller"])
+    rows_t, lost_t = REAL_TW_TRENDS(["calculator", "amazon seller calculator"])
 finally:
     tf._tw_client, tf.time.sleep = orig_client, orig_sleep
 check("v1.48 runner: rising searches for every seed, steady TOP searches only for the seller seeds",
-      sorted((r["query"], r["kind"]) for r in rows_t) == [("amazon seller calc", "rising"), ("amazon seller maker", "top"), ("calculator calc", "rising")], rows_t)
+      sorted((r["query"], r["kind"]) for r in rows_t) == [("amazon seller calculator calc", "rising"), ("amazon seller calculator maker", "top"), ("calculator calc", "rising")], rows_t)
+
+
+# ───────────────────────── 9. v1.49 — fixes from the third live run (13 Nov): tickets were cut off at 3,500 characters
+ec9 = {c["key"]: c for c in T.engine_candidates("2026-11-09")}
+NB9 = ["amazon-india-seller-profit-calculator", "minimum-selling-price-calculator-amazon-india", "rto-return-loss-calculator-india", "festival-stock-planner-india"]
+tk_f = T.make_ticket(ec9["eng:festival"], "TW-2646-01", "2026-11-09", score_val=92, parts="p", neighbours=NB9)
+tk_p = T.make_ticket(ec9["eng:profit"], "TW-2646-02", "2026-11-09", score_val=90, parts="p", neighbours=NB9)
+check("v1.49: the festival and profit tickets (too long for one box once their internal links are in) go out in 2 parts each, nothing dropped; every part within the limit",
+      len(tk_f["parts"]) == 2 and len(tk_p["parts"]) == 2 and all(len(html.escape(x)) <= T.BOX_LIMIT for t in (tk_f, tk_p) for x in t["parts"]),
+      [[len(html.escape(x)) for x in t["parts"]] for t in (tk_f, tk_p)])
+joined = "\n".join(tk_f["parts"] + tk_p["parts"])
+check("v1.49: every part is labelled 'part i/n — send all'", all(x.splitlines()[0].startswith("TW-2646-0") and "send all" in x.splitlines()[0] for x in tk_f["parts"]), tk_f["parts"][0][:120])
+check("v1.49: the parts together hold EVERY section — LINKS (the 3 internal links), TRACK, KEEP / KILL, SCORE — which the old resend cut off",
+      all(x in "\n".join(t["parts"]) for t in (tk_f, tk_p) for x in ("LINKS", "TRACK", "KEEP / KILL", "SCORE", "Link TO:", "After the result, suggest:")))
+miss = [l for l in tk_f["md"].split("\n") if l.strip() and l.strip("-* ").replace("**", "").strip() and
+        l.replace("**", "").lstrip("- ").strip() not in "\n".join(tk_f["parts"]).replace("**", "")]
+check("v1.49: nothing is lost in the split — every line of the full ticket is in the parts (compared as text)", len(miss) <= 2, miss[:4])
+old_resend = tk_f["md"][:3500]
+check("v1.49 (regression): the old resend (first 3,500 characters of the text) really did lose the end of this ticket",
+      "KEEP / KILL" not in old_resend and "After the result, suggest: C" in old_resend[-60:] or len(tk_f["md"]) > 3500, len(tk_f["md"]))
+rb = T.pack(tk_f["md"].split("\n\n"), T.BOX_LIMIT, "TW-2646-01")
+check("v1.49: resending an OLD ticket (text only) is split into parts too, never cut — and the stored box round-trips",
+      len(rb) >= 2 and all(len(html.escape(x)) <= T.BOX_LIMIT for x in rb) and "KEEP / KILL" in "\n".join(rb) and tk_f["row"]["box"].split(T.PART_MARK) == tk_f["parts"])
+weird = T.pack(["x" * 9000, "short block", "word " * 1500], T.BOX_LIMIT, "T")
+check("v1.49: pack copes with a block bigger than a message and a line with no spaces (no loop, no cut)",
+      len(weird) >= 4 and all(len(html.escape(x)) <= T.BOX_LIMIT for x in weird) and "".join(weird).count("x") == 9000, [len(x) for x in weird])
+secs = [("", ["head"], 0), ("A", ["a" * 1500], 5), ("TRACK", ["t" * 1200], 8), ("KEEP / KILL", ["k" * 1200], 7), ("SCORE", ["s" * 300], 9)]
+one = T.fit(secs, T.BOX_LIMIT, min_rank=7, hard=False)
+check("v1.49: a ticket that fits after dropping only what the standing rules cover goes in ONE box, and the note NAMES what is left out",
+      one is not None and "not in this box" in one and "Track" in one.title() and "SCORE" in one.upper() and "aaa" in one and "tttt" not in one, one[-160:] if one else one)
+check("v1.49: when dropping those is not enough, fit says so (None) and ticket_parts splits instead",
+      T.fit([("", ["h"], 0), ("A", ["a" * 4000], 5)], T.BOX_LIMIT, min_rank=7, hard=False) is None
+      and len(T.ticket_parts([("", ["h"], 0), ("A", ["a" * 4000], 5)], "T")) >= 2
+      and "".join(T.ticket_parts([("", ["h"], 0), ("A", ["a" * 4000], 5)], "T")).count("a") >= 4000)
+ecf = {c["key"]: c for c in T.engine_candidates("2026-11-13")}
+chr13 = next(l for l in ecf["eng:festival"]["pages"] if "christmas" in l)
+val13 = next(l for l in ecf["eng:festival"]["pages"] if "valentines" in l)
+check("v1.49: 13 Nov — Christmas page: under 8 weeks to its promote window (serves the channel, not Google); Valentine's: enough lead time",
+      "under 8 weeks" in chr13 and "keep it for next year" in chr13 and "enough lead time" in val13, (chr13[-150:], val13[-80:]))
+asks = T.ask_candidates([{"week": "2026-11-09", "name": n, "gap": "BUILD", "effort": "S", "regulated": "False", "requests": "1", "votes": "0", "score": "18"}
+                         for n in ("sql input sanitization library", "writing cookie based authentication in blazor", "digitize old board games")], "2026-11-13")
+check("v1.49: developer questions (libraries, frameworks, authentication) are not asked-for TOOLS and are dropped; an ordinary ask stays",
+      [c["title"] for c in asks] == ["Digitize Old Board Games"], [c["title"] for c in asks])
+check("v1.49: every seller seed carries a tool word (so its top/rising lists are tool-shaped) and the seeds are unique",
+      all(T.tool_noun(x) or "tools" in x for x in T.SELLER_SEEDS) and len(set(T.TREND_SEEDS)) == len(T.TREND_SEEDS), T.SELLER_SEEDS)
+
+# Google Trends: an EMPTY answer = too few searches (tiny); a refused request stays unverified
+class EmptyPT:
+    def __init__(self, mode): self.mode, self.kw = mode, []
+    def build_payload(self, kw, **k): self.kw = list(kw)
+    def interest_over_time(self):
+        if self.mode == "refuse":
+            raise RuntimeError("429 TooManyRequests")
+        class E:  # an empty table
+            empty = True
+        return E()
+orig_client, orig_sleep = tf._tw_client, tf.time.sleep
+tf._tw_client, tf.time.sleep = (lambda: EmptyPT("empty")), (lambda x: None)
+try:
+    g_empty = REAL_TW_SHAPES(["google keyword planner tool free"], anchor="image compressor")
+    tf._tw_client = lambda: EmptyPT("refuse")
+    g_ref = REAL_TW_SHAPES(["some other query", "third query", "fourth query", "fifth query"], anchor="image compressor")
+finally:
+    tf._tw_client, tf.time.sleep = orig_client, orig_sleep
+sh_e = g_empty.get("google keyword planner tool free")
+check("v1.49 runner: an empty Google Trends table is the 'tiny — no data' verdict (not 'unknown')",
+      sh_e and sh_e["label"] == "tiny" and "no data" in T.shape_note(sh_e, "x") and T.SHAPE_MULT["tiny"] == 0.5, sh_e)
+check("v1.49 runner: a REFUSED request stays unverified (never guessed), and the run stops after 3 refusals", g_ref == {}, g_ref)
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED"); sys.exit(1 if FAILS else 0)

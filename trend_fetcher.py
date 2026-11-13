@@ -2406,7 +2406,7 @@ def main_automation():
     by_src = {}
     for it in items:
         by_src[it["source"]] = by_src.get(it["source"], 0) + 1
-    L = [f"🛠 <b>What people want built</b> — week of {week} · v1.48 (admin only · for bizopstool)",
+    L = [f"🛠 <b>What people want built</b> — week of {week} · v1.49 (admin only · for bizopstool)",
          "Requests read: " + " · ".join(f"{k} {v}" for k, v in sorted(by_src.items())) + f" → {len(groups)} distinct needs"
          + (f" · focus words: {', '.join(BR_AUTO_FOCUS_WORDS)}" if BR_AUTO_FOCUS_WORDS else " · ⚠️ no focus words set (BR_AUTO_FOCUS_WORDS)")
          + ("" if BRAVE_API_KEY else " · web crowding: not checked (no BRAVE_API_KEY)")]
@@ -2548,7 +2548,16 @@ def tw_shapes(queries, anchor=None, cache=None):
                 log("Tool Watch: Google Trends keeps refusing — remaining curves unchecked", "WARN")
                 break
             continue
-        if df is None or getattr(df, "empty", True) or q not in df.columns:
+        if df is None:
+            log(f"  curve '{q[:40]}': no answer from Google Trends — left unverified", "WARN")
+            continue
+        if getattr(df, "empty", True):
+            # Google answers "not enough search volume" with an empty table: that IS the tiny verdict (live run 13 Nov: 3 of 9 searches)
+            out[q] = {"label": "tiny", "rel": None, "recent_share": None, "avg": 0.0, "active": 0.0, "nodata": True}
+            log(f"  curve '{q[:40]}': tiny (Google Trends has no data — too few searches)")
+            continue
+        if q not in df.columns:
+            log(f"  curve '{q[:40]}': answer had no column for it — left unverified", "WARN")
             continue
         sh = toolwatch.shape_from_series(df[q].tolist())
         if sh["label"] not in ("spike", "unknown"):
@@ -2562,7 +2571,8 @@ def tw_shapes(queries, anchor=None, cache=None):
         out[q] = sh
         log(f"  curve '{q[:40]}': {sh['label']}" + (f" (vs anchor {sh['rel']:.3f}" if sh.get("rel") is not None else " (alone")
             + f", last-14-days share {sh['recent_share']:.2f}, active {sh['active']:.2f})")
-    log(f"Tool Watch: demand curves {len(out)}/{len(uniq)} searches ({len(cache)} reused from last week)")
+    log(f"Tool Watch: demand curves {len(out)}/{len(uniq)} searches ({sum(1 for q in uniq if q in cache)} reused from last week, "
+        f"{len(need)} asked for, {sum(1 for q in need if q not in out)} unanswered)")
     return out
 
 
@@ -2657,6 +2667,9 @@ def main_toolwatch():
     tcands = [c for c in tcands if c["query"] not in ev_q]                 # a search that matches a Wave-1 tool is evidence for it, not a second ticket
     for c in ecands:
         c["evidence"] = [e for e in (evidence or []) if e["engine_key"] == c["key"]]
+    n_top_raw = sum(1 for x in raw if x.get("kind") == "top")
+    log(f"Tool Watch: steady searches {n_top_raw} → {sum(1 for c in tcands if c.get('kind') == 'top')} tool-shaped candidates; "
+        f"{len(evidence or [])} match a Wave-1 tool" + "".join(f"\n    evidence: {e['engine_key']} ← '{e['query']}' ({e['kind']} for '{e['seed']}')" for e in (evidence or [])[:6]))
     seen_rows = toolwatch.update_seen(seen_rows, tcands, TODAY)
     opp = store.read("OPPORTUNITIES")
     acands = toolwatch.ask_candidates(toolwatch.clean_rows(opp.to_dict("records") if not opp.empty else []), TODAY)
@@ -2721,7 +2734,7 @@ def main_toolwatch():
                      "type": "rules", "title": "Standing rules for every ticket", "status": "SENT", "text": rules})
     resend = os.environ.get("BR_TW_RESEND") == "1"
     again = [r for r in rows if resend and r.get("type") != "rules" and r.get("created", "") >= week and r.get("text")
-             and r["ticket_id"] not in {t["id"] for t in tickets}]
+             and r.get("status") == "NEW" and r["ticket_id"] not in {t["id"] for t in tickets}]
     # 4) save first (so a Telegram hiccup can never cause duplicate or lost tickets), then send
     store.write("TOOL_TICKETS", pd.DataFrame(rows)[toolwatch.TICKET_COLS].astype(str))
     if seen_rows:
@@ -2745,9 +2758,12 @@ def main_toolwatch():
     if first_run:
         send_telegram(f"<pre>{_esc(rules)}</pre>")
     for t in tickets:
-        send_telegram(f"<pre>{_esc(t['box'])}</pre>")
-    for r in again:
-        send_telegram(f"<pre>{_esc(r['text'][:3500])}</pre>")
+        for part in t["parts"]:
+            send_telegram(f"<pre>{_esc(part)}</pre>")
+    for r in again:                      # the stored box when there is one; older tickets: the full text split into parts (never cut off)
+        parts = r["box"].split(toolwatch.PART_MARK) if r.get("box") else toolwatch.pack(str(r["text"]).split("\n\n"), toolwatch.BOX_LIMIT, r["ticket_id"])
+        for part in parts:
+            send_telegram(f"<pre>{_esc(part)}</pre>")
     if tickets or again:
         os.makedirs(LOCAL_OUT_DIR, exist_ok=True)
         path = os.path.join(LOCAL_OUT_DIR, f"TOOLWATCH_{TODAY}.md")
@@ -2832,7 +2848,7 @@ def main():
             log(f"Backup schedule: today's data ({TODAY}) already fetched — skipping (avoids extra Amazon requests)")
             return
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.48 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v1.49 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()

@@ -1,0 +1,52 @@
+name: Bazaar Radar — Tool Watch (weekly, admin only · tickets for the bizopstool team)
+
+# Mondays 14:00 IST (08:30 UTC), after the 12:00 automation report. Builds filled-in tickets (3 feeds: engine tools,
+# rising tool searches, asked-for tools), sends them to the ADMIN chat as tap-to-copy boxes + one file, tracks which
+# pages went live and applies the 8-week keep/kill rule. Nothing is posted publicly.
+on:
+  schedule:
+    - cron: "30 8 * * 1"
+  workflow_dispatch:
+    inputs:
+      resend:
+        description: "Send this week's tickets again (1 = yes)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  toolwatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          pip install requests pandas beautifulsoup4 gspread google-auth openpyxl
+          pip install pytrends || echo "pytrends failed — Trends feed skipped"
+      - name: Build tickets
+        env:
+          BR_MODE:            toolwatch
+          GOOGLE_CREDS_JSON:  ${{ secrets.GOOGLE_CREDS_JSON }}
+          GOOGLE_SHEET_ID:    ${{ secrets.GOOGLE_SHEET_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          BRAVE_API_KEY:      ${{ secrets.BRAVE_API_KEY }}          # optional: checks how crowded page 1 is
+          BIZOPS_SITE:        ${{ vars.BIZOPS_SITE }}               # optional: https://your-domain → live pages detected automatically
+          GSC_SITE:           ${{ vars.GSC_SITE }}                  # optional: Search Console property → impressions + keep/kill automatic
+          BR_TW_TICKETS:      ${{ vars.BR_TW_TICKETS || '5' }}      # new tickets per week
+          BR_TW_MAX_OPEN:     ${{ vars.BR_TW_MAX_OPEN || '8' }}     # team backlog cap
+          BR_TW_RESEND:       ${{ inputs.resend }}
+        run: python trend_fetcher.py
+      - name: Keep the tickets file
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: toolwatch-tickets
+          path: output/TOOLWATCH_*.md
+          if-no-files-found: ignore

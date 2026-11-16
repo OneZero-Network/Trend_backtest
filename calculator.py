@@ -229,8 +229,10 @@ def merge(existing_rows, signals, today=None, top_n=TOP_N, stale_days=STALE_DAYS
         if a not in seen and not has_input and age > stale_days:
             continue
         out.append(r)
-    out.sort(key=lambda r: (not has_quote(r), -_num(r.get("trend_score")),
-                            -_num(r.get("bought"))))
+    # v1.51: among rows still waiting for a quote — falling (📉) last, durable (🧱) first, then trend score.
+    # (The marker lives in the existing 'signal' column, so the sheet layout is unchanged.)
+    out.sort(key=lambda r: (not has_quote(r), "📉" in str(r.get("signal", "")), "🧱" not in str(r.get("signal", "")),
+                            -_num(r.get("trend_score")), -_num(r.get("bought"))))
     quoted = [r for r in out if has_quote(r)]
     unquoted = [r for r in out if r not in quoted][:MAX_UNQUOTED]
     return quoted + unquoted + manual

@@ -60,11 +60,29 @@ b2 = {r["item_key"]: r for r in c2}
 check("day 2 → lunch box promoted; first_seen kept", b2["q:hot lunch box"]["status"] == "2+ sources"
       and b2["q:hot lunch box"]["first_seen"] == "2026-11-10" and b2["q:hot lunch box"]["days_seen"] == 2)
 
-# ── seeds grow and expire
-s1 = D.update_seeds([], [{"phrase": "air fryer", "rise": 5000}, {"phrase": "mat", "rise": 5000}], "2026-11-10")
-check("strong 2-word phrase becomes a seed; 1-word doesn't", [r["seed"] for r in s1] == ["air fryer"], s1)
-check("active for 7 days", "air fryer" in D.active_seeds(s1, "2026-11-16", base=["x"]) and "air fryer" not in D.active_seeds(s1, "2026-11-19", base=["x"]))
-check("growing seeds go first, then today's slice", D.active_seeds(s1, "2026-11-11", base=["lunch box", "mop"]) == ["air fryer", "lunch box", "mop"])
+# ── seeds grow and expire (v1.50: a candidate must rise on 2 separate days before it is used)
+R1 = [{"phrase": "air fryer", "rise": 5000, "seed": "air fryer"}, {"phrase": "mat", "rise": 5000, "seed": "mat"}]
+s1 = D.update_seeds([], R1, "2026-11-10")
+check("strong 2-word phrase becomes a candidate seed; 1-word doesn't", [r["seed"] for r in s1] == ["air fryer"] and s1[0]["hits"] == 1, s1)
+check("a one-day candidate is NOT used yet", "air fryer" not in D.active_seeds(s1, "2026-11-11", base=["x"]))
+check("a same-day re-run is not a second hit", D.update_seeds(s1, R1, "2026-11-10")[0]["hits"] == 1)
+s2 = D.update_seeds(s1, R1, "2026-11-11")
+check("risen on a second separate day → hits 2 → active", s2[0]["hits"] == 2 and "air fryer" in D.active_seeds(s2, "2026-11-12", base=["x"]), s2)
+check("active for 5 days", "air fryer" in D.active_seeds(s2, "2026-11-16", base=["x"]) and "air fryer" not in D.active_seeds(s2, "2026-11-18", base=["x"]))
+check("growing seeds go first, then today's slice", D.active_seeds(s2, "2026-11-12", base=["lunch box", "mop"]) == ["air fryer", "lunch box", "mop"])
+check("rows from before v1.50 (no hit count) are inactive until they rise again",
+      "old seed" not in D.active_seeds([{"seed": "old seed", "added": "2026-11-11", "last_rising": "2026-11-11", "lane": "products"}], "2026-11-12", base=["x"]))
+junk = D.update_seeds([], [{"phrase": "philips hair dryer hp8143", "rise": 5000, "seed": "hair dryer"},
+                           {"phrase": "borosil lunch box set of 3", "rise": 5000, "seed": "lunch box"},
+                           {"phrase": "megaa click", "rise": 5000, "seed": "video editor", "lane": "apps"},
+                           {"phrase": "storage box", "rise": 5000, "seed": "storage box"}], "2026-11-10")
+check("model numbers, >3-word strings and phrases not about their seed are never admitted",
+      [r["seed"] for r in junk] == ["storage box"], junk)
+many = D.update_seeds([{"seed": f"seed {i} box", "added": f"2026-11-{1 + i % 9:02d}", "last_rising": "2026-11-09", "lane": "products", "hits": 3}
+                       for i in range(45)], [], "2026-11-10")
+check("seed table is bounded per lane", len(many) == D.MAX_SEED_ROWS_PER_LANE, len(many))
+check("rise is capped at the Breakout level (+128,650% from a tiny base is not 25x stronger)",
+      D.rise_value("128650") == 5000.0 and D.rise_value("+350%") == 350.0 and D.rise_value("Breakout") == 5000.0)
 
 # ── lead test: found 10 Nov (not on Amazon), appears on Amazon 15 Nov → 5-day lead
 disc = [{"date": "2026-11-10", "item_key": "q:neck fan", "kind": "phrase", "name": "neck fan", "product_id": "", "sources": "gtrends"},
@@ -97,8 +115,9 @@ bs_ = {r["item_key"]: r for r in cs}
 check("skill confirmed by Trends + 3 YouTube channels → 2+ sources; own key prefix",
       bs_["sk:python"]["status"] == "2+ sources" and bs_["sk:power bi"]["status"] == "watch", bs_)
 check("skills never matched against Amazon lists", all("amazon_list" not in r["sources"] for r in cs))
-seeds_all = D.update_seeds([], [{"phrase": "power bi", "rise": 5000, "lane": "skills"},
-                                {"phrase": "air fryer", "rise": 5000}], "2026-11-10")
+_sa = [{"phrase": "power bi", "rise": 5000, "lane": "skills", "seed": "power bi"},
+       {"phrase": "air fryer", "rise": 5000, "seed": "air fryer"}]
+seeds_all = D.update_seeds(D.update_seeds([], _sa, "2026-11-10"), _sa, "2026-11-11")
 check("growing seeds stay in their own lane", "power bi" in D.active_seeds(seeds_all, "2026-11-11", ["excel"], "skills")
       and "power bi" not in D.active_seeds(seeds_all, "2026-11-11"))
 

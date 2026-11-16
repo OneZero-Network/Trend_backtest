@@ -114,7 +114,12 @@ big = pd.DataFrame([{"horizon_days": 14, "role": "pick", "resolved": 60, "hits":
 check("verdict reports lift vs random when enough data", "2.00×" in P.verdict(big) and "beat random" in P.verdict(big), P.verdict(big))
 
 # ── end to end (local files)
-H.to_csv(os.path.join(TMP, "HISTORY.csv"), index=False)
+# v1.50: the public pool drops picks whose own history reads "holding" — so the two fixture picks must really climb
+Hi = H.copy()
+for _a, _end in (("KIT0000010", 3), ("KIT0000016", 6)):
+    _m = (Hi.asin == _a) & (Hi.date >= day(21))
+    Hi.loc[_m, "rank"] = [_end + (29 - (int(d[-2:]) - 1)) * 2 for d in Hi.loc[_m, "date"]]
+Hi.to_csv(os.path.join(TMP, "HISTORY.csv"), index=False)
 sig.to_csv(os.path.join(TMP, "TREND_SIGNALS.csv"), index=False)
 tf.LOCAL_OUT_DIR = TMP; tf.AFFILIATE_POST_GAP_SEC = 0; tf.TODAY = day(29); tf.AFFILIATE_TAG = ""; tf.AFFILIATE_CHAT_ID = ""
 msgs = []; tf.send_telegram = msgs.append
@@ -131,7 +136,7 @@ check("second run same date does not duplicate picks", len(pd.read_csv(os.path.j
 H.iloc[0:0].to_csv(os.path.join(TMP, "HISTORY.csv"), index=False); msgs.clear(); tf.main_affiliate()
 check("refuses to pick with < 7 days of history", any("no picks yet" in m for m in msgs))
 # ── two chats: admin gets everything internal, public gets only product posts
-H.to_csv(os.path.join(TMP, "HISTORY.csv"), index=False)
+Hi.to_csv(os.path.join(TMP, "HISTORY.csv"), index=False)
 os.remove(os.path.join(TMP, "PICKS.csv"))
 # v1.18: 30 Nov run date → Diwali kit held back (season window) → 2 picks, not 3
 sent = []

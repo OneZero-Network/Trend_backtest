@@ -72,6 +72,9 @@ def gate_all(hist, signals, today, min_history=None, lookback=None, min_days_in=
         comp, seas = str(s.get("compliance", "")), s.get("seasonal", "")
         if "EXPLOSIVES" in comp:
             out[a] = "❌ NO — firecracker/explosives"; continue
+        rn = str(s.get("resell_note", "") or "")
+        if rn and rn.lower() not in ("nan", "none"):          # v1.50: brand / formulated / dangerous goods
+            out[a] = f"❌ NO — {rn}"; continue
         w = season.window(seas, today)
         if w["event"] and not w["stock_ok"]:
             out[a] = f"❌ NO — season: {w['note']}"; continue

@@ -36,6 +36,7 @@ import os, re, sys, json, math, time, random, traceback, html as _html
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from discount_rule import discount_status            # shared with backtest — one rule
 import calculator, compliance, youtube_check, sourcing, picks, brief, discovery, automation, season, toolwatch
+import capture, resell_gate, durable
 from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree as ET
 
@@ -57,6 +58,7 @@ except ImportError:
     cffi_requests = None
     HAS_CURL_CFFI = False
 
+VERSION = "1.51"        # the ONE place the version lives (digest header, log banner, Tool Watch digest)
 IST = timezone(timedelta(hours=5, minutes=30))
 NOW_IST = datetime.now(IST)
 TODAY = NOW_IST.strftime("%Y-%m-%d")
@@ -135,6 +137,8 @@ AFFILIATE_GROUPS = os.environ.get("AFFILIATE_GROUPS") or ""
 # v1.27 drip posting: one pool per data day, posted in small batches through the day
 AFFILIATE_SHEET_ID = os.environ.get("AFFILIATE_SHEET_ID") or ""     # separate Google Sheet for affiliate tabs
 BR_POOL_SIZE       = int(os.environ.get("BR_POOL_SIZE") or 12)
+BR_DURABLE_SHARE   = min(1.0, max(0.0, float(os.environ.get("BR_DURABLE_SHARE") or 0.67)))   # v1.51: share of public picks from the durable arm (0 = momentum only)
+BR_CALC_DURABLE_N  = int(os.environ.get("BR_CALC_DURABLE_N") or 10)                           # v1.51: of BR_CALC_TOP_N calculator slots, durable first
 BR_STOCK_PREVIEW   = (os.environ.get("BR_STOCK_PREVIEW") or "1") != "0"   # admin-only early stock-gate look
 BR_POOL_PER_GROUP  = int(os.environ.get("BR_POOL_PER_GROUP") or 6)
 DRIP_SLOTS_IST     = [int(h) for h in (os.environ.get("BR_DRIP_HOURS") or "9,11,13,15,17,19,21").split(",") if h.strip()]
@@ -570,15 +574,83 @@ def parse_list_page(html, list_type, slug):
     return rows
 
 
-def fetch_amazon_lists():
+# v1.50 below-the-fold probe. Amazon lazy-loads ranks 31-50 / 81-100 (no price/rating/reviews in the first response).
+# Whether the "isAboveTheFold=0" request returns those cards is UNVERIFIED, so the run tests it on the first
+# bestseller page that needs it: ≥50% of the placeholders priced → keep using it; otherwise stop after one try.
+# BR_LAZY_FETCH: auto (default) | 0 (never) | 1 (always, no self-test).
+BR_LAZY_FETCH = (os.environ.get("BR_LAZY_FETCH") or "auto").strip().lower()
+LAZY = {"state": "untested" if BR_LAZY_FETCH != "0" else "off", "form": None, "placeholders": 0, "filled": 0, "requests": 0}
+LAZY_MIN_PLACEHOLDERS = 5
+MOVERS_DEAD_DAYS = 5          # Amazon's Movers & Shakers pages have rendered empty for days → stop asking
+MOVERS_REPROBE_EVERY = 7      # …but look again once a week in case Amazon brings them back
+
+
+def movers_dead(hist, today):
+    """True when HISTORY shows ≥ MOVERS_DEAD_DAYS days of bestseller data and not a single 'movers' row on any of
+    the last MOVERS_DEAD_DAYS days. (Our own movers come from rank history, so nothing is lost; 8 requests/day are.)
+    A re-probe day (every MOVERS_REPROBE_EVERY days) always fetches."""
+    if os.environ.get("BR_FETCH_MOVERS", "auto").lower() == "1":
+        return False
+    if os.environ.get("BR_FETCH_MOVERS", "auto").lower() == "0":
+        return True
+    if hist is None or len(hist) == 0 or "list" not in hist:
+        return False
+    if datetime.strptime(today, "%Y-%m-%d").toordinal() % MOVERS_REPROBE_EVERY == 0:
+        return False
+    days = sorted(d for d in hist.loc[hist["list"] == "bestsellers", "date"].unique() if d < today)[-MOVERS_DEAD_DAYS:]
+    if len(days) < MOVERS_DEAD_DAYS:
+        return False
+    return not ((hist["list"] == "movers") & hist["date"].isin(days)).any()
+
+
+def lazy_fill(sess_box, url, rows, list_type, slug):
+    """Try to price the placeholder rows of a bestseller page via the below-the-fold request. → rows filled."""
+    if list_type != "bestsellers" or LAZY["state"] in ("off", "failed"):
+        return 0
+    ph = [r for r in rows if capture.is_placeholder(r)]
+    if len(ph) < LAZY_MIN_PLACEHOLDERS:
+        return 0
+    cands = capture.lazy_urls(url)
+    for i in ([LAZY["form"]] if LAZY["form"] is not None else range(len(cands))):
+        LAZY["requests"] += 1
+        html = fetch_html(sess_box, cands[i], retries=1)
+        if html is None:
+            continue
+        try:
+            extra = parse_list_page(html, list_type, slug)
+        except Exception as exc:
+            log(f"  lazy-tail parse failed: {type(exc).__name__}", "DBG")
+            continue
+        n = capture.merge_lazy(rows, extra)
+        LAZY["placeholders"] += len(ph); LAZY["filled"] += n
+        if BR_LAZY_FETCH == "1" or n >= 0.5 * len(ph):
+            if LAZY["state"] != "working":
+                log(f"  lazy-tail probe OK: priced {n}/{len(ph)} placeholders on {slug} — using it for the other bestseller pages")
+            LAZY["state"], LAZY["form"] = "working", i
+            return n
+        log(f"  lazy-tail probe: only {n}/{len(ph)} priced via form {i + 1} — not enough")
+    if LAZY["state"] == "untested":
+        LAZY["state"] = "failed"
+        log("  lazy-tail probe FAILED — Amazon did not return the hidden cards this way; stock is checked from "
+            f"last-seen prices instead (carry {capture.STOCK_CARRY_DAYS}d). Not retrying today.", "WARN")
+    return 0
+
+
+def fetch_amazon_lists(hist=None):
     sess_box = [new_session()]
     # warm-up: homepage sets session cookies, cuts captcha rate
     fetch_html(sess_box, "https://www.amazon.in/", retries=1)
 
     out = {k: [] for k in LISTS}
     stats = {"ok": 0, "blocked": 0, "empty": 0, "amazon_empty": 0}
+    skip_movers = movers_dead(hist, TODAY)
+    if skip_movers:
+        log(f"Movers & Shakers: empty on Amazon for {MOVERS_DEAD_DAYS}+ days → skipped (our own movers come from rank "
+            f"history); re-checked every {MOVERS_REPROBE_EVERY} days. Force with BR_FETCH_MOVERS=1.")
     for slug in CATEGORIES:
         for list_type, tmpl in LISTS.items():
+            if list_type == "movers" and skip_movers:
+                continue
             base = tmpl.format(slug=slug)
             got = []
             for pg in (1, 2):                       # pg=2 holds ranks 51-100 on most lists
@@ -588,6 +660,8 @@ def fetch_amazon_lists():
                     stats["blocked"] += 1
                     break
                 rows = parse_list_page(html, list_type, slug)
+                if rows:
+                    lazy_fill(sess_box, url, rows, list_type, slug)
                 if not rows:
                     if _AMAZON_EMPTY.search(html):
                         # Amazon itself says the list is empty — not a parser problem
@@ -647,6 +721,18 @@ _NOISE_QUERY = re.compile(r"\b(movie|film|song|songs|lyrics|meaning|in hindi mea
                           r"how much|kaise|recipe)\b", re.I)
 
 
+RISE_CAP = 5000        # % — Google's own "Breakout" level. +2,347,100% is a tiny number doubling, not demand.
+
+
+def fmt_rise(v):
+    """+350% · '+5,000%+ (breakout)' — never a six- or seven-digit percentage."""
+    try:
+        x = float(str(v).replace("%", "").replace("+", "").replace(",", ""))
+    except ValueError:
+        return str(v)
+    return f"+{RISE_CAP:,}%+ (breakout)" if x >= RISE_CAP else f"+{x:,.0f}%"
+
+
 def fetch_rising_queries():
     try:
         from pytrends.request import TrendReq
@@ -665,9 +751,10 @@ def fetch_rising_queries():
             if rq is not None and not rq.empty:
                 rq = rq[~rq["query"].astype(str).str.contains(_NOISE_QUERY)]
                 for _, r in rq.head(10).iterrows():
+                    raw = float(r["value"])
                     rows.append({"date": TODAY, "source": "rising_query", "query": r["query"],
-                                 "seed": kw, "value": str(r["value"]),  # % growth, or 'Breakout'
-                                 "note": "Breakout (>5000%)" if r["value"] >= 5000 else ""})
+                                 "seed": kw, "value": str(int(min(raw, RISE_CAP))),   # capped: v1.50
+                                 "note": f"Breakout (raw +{raw:,.0f}%)" if raw >= RISE_CAP else ""})
             time.sleep(6 + random.uniform(0, 4))
         except Exception as exc:
             log(f"  pytrends '{kw}' failed: {type(exc).__name__}: {exc}", "WARN")
@@ -790,38 +877,53 @@ def fetch_details(asins):
 # volume. We compare ranks across windows, not raw values.
 # ══════════════════════════════════════════════════════════════════════
 
-BR_STATE_PRODUCT_KW = int(os.environ.get("BR_STATE_PRODUCT_KW") or 8)
+BR_STATE_PRODUCT_KW = int(os.environ.get("BR_STATE_PRODUCT_KW") or 6)
 
 
 def product_keywords(signals, n=BR_STATE_PRODUCT_KW):
     """Generic 2-word searches for the top rising products (brand dropped, e.g. 'string light'),
-    so the weekly state run answers 'WHERE is this product wanted', not only seed topics."""
+    so the weekly state run answers 'WHERE is this product wanted', not only seed topics.
+    v1.50: a keyword must be a CONTIGUOUS two-word phrase that appears in ≥3 different titles. The old 'two most
+    generic words' rule built 'toy boys', 'deep roll' and 'anti skin' out of unrelated words (and spent ~8 minutes of
+    Google Trends requests on them)."""
     if signals is None or signals.empty or n <= 0:
         return []
     s = signals.copy()
     s["_t"] = pd.to_numeric(s["trend_score"], errors="coerce")
     if "actionable" in s:
         s = s[s["actionable"].astype(str).str.lower() != "false"]
-    # generic words = words that appear in many different titles ("string", "light", "bottle");
-    # brand/model words ("tekcool", "parabola", "boomers") appear in one or two → dropped
     import season as _season
-    df = {}
-    for t in signals["title"].dropna().astype(str):
-        for w in set(re.findall(r"[a-z]{3,}", t.lower())):
-            df[w] = df.get(w, 0) + 1
     stop = {"for", "with", "and", "the", "pack", "set", "men", "women", "kids", "home", "use", "inch", "size",
             "black", "white", "blue", "red", "green", "pcs", "piece", "pieces", "combo", "new", "large", "small",
-            "medium", "premium", "quality", "multicolor", "multicolour", "free", "best", "gift", "warm", "colour", "color"}
+            "medium", "premium", "quality", "multicolor", "multicolour", "free", "best", "gift", "warm", "colour", "color",
+            "boys", "girls", "boy", "girl", "baby", "adult", "unisex", "pro", "max", "plus", "mini", "ultra",
+            "enterprise", "enterprises", "industries", "international", "products", "store", "traders", "brand", "official"}
+
+    def head_words(t):
+        t = str(t)
+        b = resell_gate.brand_of(t)
+        w = re.findall(r"[a-z]{3,}", re.split(r"[|,(]", t.lower())[0])
+        if b and w[:1] == resell_gate._toks(b)[:1]:
+            return w[len(resell_gate._toks(b)):]
+        return w[1:] if len(w) >= 4 else w          # Amazon titles lead with the brand (listed or not)
+
+    bigram_df = {}
+    for t in signals["title"].dropna().astype(str):
+        w = head_words(t)
+        for pair in {(a_, b_) for a_, b_ in zip(w, w[1:]) if a_ not in stop and b_ not in stop}:
+            bigram_df[pair] = bigram_df.get(pair, 0) + 1
     out = []
     for _, r in s.sort_values("_t", ascending=False).iterrows():
         if "EXPLOSIVES" in str(r.get("compliance", "")) or not _season.window(r.get("seasonal", ""), TODAY)["affiliate_ok"]:
             continue
-        words = [w for w in re.findall(r"[a-z]{3,}", str(r["title"]).lower().split("|")[0])
-                 if w not in stop and df.get(w, 0) >= 4]
-        uniq = list(dict.fromkeys(words))
-        top2 = sorted(sorted(uniq, key=lambda w: -df[w])[:2], key=uniq.index)   # 2 most generic, title order
-        kw = " ".join(top2)
-        if len(kw) >= 5 and sorted(kw.split()) not in [sorted(o.split()) for o in out]:
+        w = head_words(r["title"])
+        cands = [(bigram_df.get((a_, b_), 0), i, (a_, b_)) for i, (a_, b_) in enumerate(zip(w, w[1:]))
+                 if a_ not in stop and b_ not in stop]
+        cands = [c for c in cands if c[0] >= 3]
+        if not cands:
+            continue
+        kw = " ".join(max(cands)[2])          # most common phrase; on a tie the LATER one (titles end with the product noun)
+        if len(kw) >= 5 and kw not in out:
             out.append(kw)
         if len(out) >= n:
             break
@@ -975,6 +1077,11 @@ def compute_signals(hist, frames):
                   .set_index("asin")[["title", "category_slug", "price_inr", "rating"]])
     out = latest.copy()
     out["category"] = out["category_slug"].map(lambda s: CATEGORIES.get(s, s))
+    # v1.50: "no price" ≠ "out of stock". Ranks 31-50 / 81-100 arrive as placeholders (no card) — see capture.py.
+    _st = capture.stock_states(hist, TODAY)
+    out["stock_state"] = _st["stock_state"].reindex(out.index).fillna("unknown") if len(_st) else "unknown"
+    _pb = _st["price_best"].reindex(out.index) if len(_st) else pd.Series(float("nan"), index=out.index)
+    out["price_inr"] = _pb.where(out["stock_state"].isin(["in_stock", "carried"]))
 
     # rank today vs ~7d ago on bestsellers (best rank per day per asin)
     daily_rank = bs.groupby(["asin", "date"])["rank"].min().unstack()
@@ -1089,22 +1196,40 @@ def compute_signals(hist, frames):
         if r["new_launch"] > 0:                        return "🆕 New release"
         return "• Watch"
     out["signal"] = out.apply(label, axis=1)
+    # v1.51 DURABILITY + EXIT (durable.py). Momentum had ~no predictive value in the 17-day population test;
+    # persistence did, and a fresh fall predicted leaving. 'durable' = on the list most of the last 14 days at a real rank.
+    _dur = durable.durability(hist, TODAY)
+    _ex = durable.exit_flags(hist, TODAY)
+    for c in ("durable_days", "durable_window", "median_rank", "durable_score", "durable_note"):
+        out[c] = _dur[c].reindex(out.index) if len(_dur) else None
+    out["durable"] = (_dur["durable"].reindex(out.index).fillna(False).astype(bool) if len(_dur) else False)
+    out["exit_flag"] = (_ex["exit_flag"].reindex(out.index).fillna("") if len(_ex) else "")
+    out["exit_note"] = (_ex["exit_note"].reindex(out.index).fillna("") if len(_ex) else "")
+    out["non_product"] = [compliance.non_product(t) for t in out["title"].fillna("").astype(str)]
+    out.loc[out["non_product"] != "", "durable"] = False        # a bill-payment tile that sits at #1 for weeks is not demand
+    _d = out["durable"].astype(bool)
+    out.loc[_d & out["signal"].eq("• Watch"), "signal"] = "🧱 Durable"
+    out.loc[_d & ~out["signal"].str.startswith("🧱"), "signal"] = out.loc[_d & ~out["signal"].str.startswith("🧱"), "signal"] + " · 🧱 durable"
+    _f = out["exit_flag"].eq("falling")
+    out.loc[_f, "signal"] = out.loc[_f, "signal"] + " · 📉 falling"
     # QUARANTINE (mirrors backtest): an unconfirmed dip is withheld from recommendations. The daily
     # run re-evaluates it automatically: price recovers → organic score released; stays down for
     # 3 snapshots (48h) → penalty applied. Never assume innocence on the day it matters.
     out["actionable"] = ~out["short_dip"].fillna(False).astype(bool)
     out["confidence"] = "low (<7 days history)" if ndays < 7 else ("medium" if ndays < 21 else "high")
 
-    cols = ["trend_score", "signal", "confidence", "category", "category_slug", "title", "price_inr", "rating",
+    cols = ["trend_score", "signal", "confidence", "category", "category_slug", "title", "price_inr", "stock_state", "rating",
             "reviews", "reviews_per_day", "review_growth_pct", "bs_rank_today", "bs_rank_ref",
             "bs_ref_date", "rank_change", "price_change_7d_pct", "discount_status", "discount_driven", "short_dip", "actionable",
             "trend_score_unpenalized", "pct_gain", "mover_source", "mover_note", "lists_today", "days_on_list_14d",
-            "first_seen", "momentum", "mover", "review_vel", "new_launch", "persistence", "breadth"]
+            "first_seen", "momentum", "mover", "review_vel", "new_launch", "persistence", "breadth",
+            "durable", "durable_score", "durable_days", "durable_window", "median_rank", "durable_note",
+            "exit_flag", "exit_note", "non_product"]
     out = out.reset_index().rename(columns={"index": "asin"})
     out["url"] = "https://www.amazon.in/dp/" + out["asin"]
     out = out[["asin"] + cols + ["url"]].sort_values("trend_score", ascending=False)
     for c in ("trend_score", "trend_score_unpenalized", "reviews_per_day", "review_growth_pct", "momentum", "mover",
-              "review_vel", "new_launch", "persistence", "breadth"):
+              "review_vel", "new_launch", "persistence", "breadth", "durable_score", "median_rank"):
         out[c] = pd.to_numeric(out[c], errors="coerce").round(2)
     return out
 
@@ -1348,7 +1473,7 @@ def main_affiliate():
         send_telegram(f"🔁 Picks for {last} were only drafted before — posting them to the channel now (with your tag).")
     else:
         rejected = []
-        chosen = picks.select_picks(sig, n=BR_AFF_TOP_N, today=TODAY, rejected=rejected)
+        chosen = select_mixed(sig, hist, last, BR_AFF_TOP_N, rejected)
         _report_rejected(rejected)
         if chosen.empty:
             send_telegram("🔍 Affiliate picks: no eligible products this week."); return
@@ -1356,8 +1481,7 @@ def main_affiliate():
         trk = pd.concat([trk, rows.astype(str)], ignore_index=True) if not trk.empty else rows
         store.write("PICKS", trk)
     _trk_u = picks.update_tracking(trk, hist) if not trk.empty else trk
-    sc = picks.scorecard(_trk_u) if not trk.empty else pd.DataFrame()
-    line = picks.verdict(sc, tracker=_trk_u) if not sc.empty else ""
+    line = picks.momentum_verdict(_trk_u) if not trk.empty else ""
     msgs = picks.post_messages(chosen, hist, AFFILIATE_TAG, last, cat_names=CATEGORIES,
                                week_label=f"week of {last}")
     store.write("AFFILIATE_POST", pd.DataFrame({"message": msgs}))
@@ -1408,7 +1532,7 @@ def _recorded_picks(trk, sig, last):
     rows = []
     for r in rec.to_dict("records"):
         extra = base.loc[r["asin"]].to_dict() if r["asin"] in base.index else {}
-        rows.append({**extra, **{k: v for k, v in r.items() if k in ("asin", "title", "category_slug", "trend_score")}})
+        rows.append({**extra, **{k: v for k, v in r.items() if k in ("asin", "title", "category_slug", "trend_score", "arm")}})
     return pd.DataFrame(rows)
 
 
@@ -1421,6 +1545,85 @@ def _mark_public(store, last, chat, n):
     pp = store.read("PUBLIC_POSTS")
     row = pd.DataFrame([{"pick_date": last, "chat": str(chat), "posted_at": NOW_IST.strftime("%Y-%m-%d %H:%M"), "items": n}])
     store.write("PUBLIC_POSTS", pd.concat([pp, row], ignore_index=True) if not pp.empty else row)
+
+
+def select_public(sub, hist, last, n, rejected, max_per_cat=None):
+    """Picks for a PUBLIC post: the signal filters (picks.select_picks) plus the own-history check, so the line printed
+    under each product ('Climbed #38 → #4') can never contradict the 'rising' claim."""
+    kw = {"max_per_cat": max_per_cat} if max_per_cat else {}
+    ch = picks.select_picks(sub, n=n * 2, today=TODAY, rejected=rejected, **kw)
+    return picks.drop_holders(ch, hist, last, rejected).head(n)
+
+
+def _cap_trim(df, counts, cap, n):
+    out = []
+    for _, r in df.iterrows():
+        c = r.get("category_slug") or r.get("category")
+        if counts.get(c, 0) >= cap:
+            continue
+        counts[c] = counts.get(c, 0) + 1
+        out.append(r)
+        if len(out) >= n:
+            break
+    return pd.DataFrame(out)
+
+
+def select_mixed(sub, hist, last, n, rejected, max_per_cat=None, share=None):
+    """v1.51 public picks from TWO arms, so the forward test can tell which one deserves the slots:
+      durable   on the lists most of the last 14 days, not falling (post claim: 'on the list N of the last M days')
+      momentum  climbed ≥10 places (the v1.4x logic, now also dropping anything that is falling)
+    `share` (BR_DURABLE_SHARE, default 2/3) of the n slots go to durable; either arm tops up the other if it runs short.
+    Durable and momentum picks are interleaved 2:1 so both appear all day. Every row carries its `arm`."""
+    share = BR_DURABLE_SHARE if share is None else share
+    cap = max_per_cat or picks.MAX_PER_CATEGORY
+    n_d = int(round(n * share))
+    dur = picks.select_durable(sub, n=n_d, max_per_cat=cap, today=TODAY, rejected=rejected) if n_d else pd.DataFrame()
+    counts = {}
+    for _, r in (dur.iterrows() if len(dur) else []):
+        c = r.get("category_slug") or r.get("category")
+        counts[c] = counts.get(c, 0) + 1
+    used = set(dur["asin"]) if len(dur) else set()
+    n_m = n - len(dur)
+    mom = pd.DataFrame()
+    if n_m > 0:
+        cand = select_public(sub[~sub["asin"].isin(used)], hist, last, n_m * 2, rejected, max_per_cat=cap)
+        mom = _cap_trim(cand, counts, cap, n_m) if len(cand) else pd.DataFrame()
+        used |= set(mom["asin"]) if len(mom) else set()
+    short = n - len(dur) - len(mom)
+    if short > 0 and share < 1.0 and len(dur) >= n_d:         # momentum ran dry → durable tops up
+        more = picks.select_durable(sub[~sub["asin"].isin(used)], n=short * 2, max_per_cat=cap, today=TODAY, rejected=[])
+        more = _cap_trim(more, counts, cap, short) if len(more) else more
+        if len(more):
+            dur = pd.concat([dur, more], ignore_index=True) if len(dur) else more
+    d_rows = [r for _, r in dur.iterrows()] if len(dur) else []
+    m_rows = [r for _, r in mom.iterrows()] if len(mom) else []
+    out, i, j = [], 0, 0
+    while i < len(d_rows) or j < len(m_rows):
+        for _ in range(2):
+            if i < len(d_rows):
+                out.append(d_rows[i]); i += 1
+        if j < len(m_rows):
+            out.append(m_rows[j]); j += 1
+    return pd.DataFrame(out).reset_index(drop=True) if out else pd.DataFrame()
+
+
+def calc_feed(act, top_n, durable_n):
+    """Which actionable signals are appended to the CALCULATOR today: durable resellable products first (up to
+    `durable_n` of the `top_n` slots), then the highest trend scores. Falling products are never added as new rows —
+    a quote takes days and the product may be gone by then. (Rows already in the sheet are refreshed regardless.)"""
+    if act is None or len(act) == 0:
+        return act
+    a = act.copy()
+    if "exit_flag" in a:
+        a = a[a["exit_flag"].fillna("").astype(str) != "falling"]
+    if durable_n <= 0 or "durable" not in a:
+        return a.head(top_n)
+    seas = a["seasonal"].astype(str).str.startswith("SEASONAL") if "seasonal" in a else pd.Series(False, index=a.index)
+    dur = a[a["durable"].astype(str).str.lower().isin(["true", "1"]) & ~seas]
+    if "durable_score" in dur:
+        dur = dur.sort_values("durable_score", key=lambda x: pd.to_numeric(x, errors="coerce"), ascending=False)
+    dur = dur.head(durable_n)
+    return pd.concat([dur, a[~a["asin"].isin(dur["asin"])]]).head(top_n)
 
 
 def _report_rejected(rejected, top=8):
@@ -1455,7 +1658,7 @@ def _affiliate_groups(store, hist, sig, last):
     slug = sig.get("category_slug", sig.get("category")).astype(str)
     per_group, all_chosen, rejected = [], [], []
     for g in groups:
-        ch = picks.select_picks(sig[slug.isin(g["cats"])], n=BR_AFF_TOP_N_GROUP, today=TODAY, rejected=rejected)
+        ch = select_mixed(sig[slug.isin(g["cats"])], hist, last, BR_AFF_TOP_N_GROUP, rejected)
         per_group.append((g, ch))
         if not ch.empty:
             all_chosen.append(ch)
@@ -1468,8 +1671,7 @@ def _affiliate_groups(store, hist, sig, last):
         trk = pd.concat([trk, rows.astype(str)], ignore_index=True) if not trk.empty else rows
         store.write("PICKS", trk)
     _trk_u = picks.update_tracking(trk, hist) if not trk.empty else trk
-    sc = picks.scorecard(_trk_u) if not trk.empty else pd.DataFrame()
-    line = picks.verdict(sc, tracker=_trk_u) if not sc.empty else ""
+    line = picks.momentum_verdict(_trk_u) if not trk.empty else ""
     report, saved = [], []
     for g, ch in per_group:
         if ch.empty:
@@ -1528,7 +1730,7 @@ def main_brief():
     line, weeks = "", 0
     if not trk.empty:
         trk = picks.update_tracking(trk, hist)
-        line = picks.verdict(picks.scorecard(trk), tracker=trk)
+        line = picks.momentum_verdict(trk)
         weeks = trk["pick_date"].nunique()
     disc = store.read("DISCOVERY")
     early = []
@@ -1542,7 +1744,11 @@ def main_brief():
         rr = sig[sig["stock_gate"].astype(str).str.contains("STOCK-READY")]
         ready = [(r["title"], r["stock_gate"]) for _, r in rr.iterrows()]
     # stock-ready list is YOUR edge — admin only, not in the brief sellers receive
-    page, text = brief.build(sig, heat, line, hist, last, picks, CATEGORIES, weeks, early=early, ready=None)
+    try:
+        _fader = durable.fader_line(durable.fader_rates(hist))
+    except Exception as exc:
+        log_tb("fader rates", exc); _fader = ""
+    page, text = brief.build(sig, heat, line, hist, last, picks, CATEGORIES, weeks, early=early, ready=None, fader=_fader)
     if ready:
         send_telegram("🔒 <b>Stock-ready (admin only — not in the seller brief)</b>\n"
                       + "\n".join(f"• {_esc(str(t)[:70])}" for t, _ in ready[:10]))
@@ -1576,13 +1782,31 @@ def main_sourcing():
     todo = [r for r in rows if r.get("asin") and not calculator.has_quote(r, quoted) and r["asin"] not in recent
             and season.window(r.get("seasonal", ""), TODAY)["stock_ok"]
             and "EXPLOSIVES" not in str(r.get("compliance", ""))]
+    # v1.50: don't spend IndiaMART searches on products a reseller can't source (brands, cosmetics/food, hazmat).
+    # 36 of 60 rows in week 3 scored relevance 0.0 — they were all of this kind.
+    _before = len(todo)
+    _drop = {}
+    _keep = []
+    for r in todo:
+        c = resell_gate.check(r.get("product", ""), r.get("category", ""))
+        if c["ok"]:
+            _keep.append(r)
+        else:
+            _drop[c["kind"]] = _drop.get(c["kind"], 0) + 1
+    todo = _keep
+    if _drop:
+        log(f"Sourcing: skipped {_before - len(todo)} calculator rows that are not resellable "
+            f"({', '.join(f'{v} {k}' for k, v in _drop.items())}) — affiliate-only")
     # seasonal and quarantined rows last — least likely to be bought
+    # v1.51: falling products last, durable (🧱) ahead of pure momentum
     todo.sort(key=lambda r: (str(r.get("seasonal", "")).startswith("SEASONAL"),
-                             "Quarantined" in str(r.get("signal", "")), -calculator._num(r.get("trend_score"))))
+                             "Quarantined" in str(r.get("signal", "")), "📉" in str(r.get("signal", "")),
+                             "🧱" not in str(r.get("signal", "")), -calculator._num(r.get("trend_score"))))
     todo = todo[:BR_SOURCING_TOP_N]
     log(f"Calculator rows: {len(rows)} · waiting for a quote & not checked in {BR_SOURCING_RECHECK}d: {len(todo)}")
     if not todo:
-        send_telegram(f"🏭 Bazaar Radar sourcing — nothing to check today ({len(rows)} calculator rows).")
+        send_telegram(f"🏭 Bazaar Radar sourcing — nothing to check today ({len(rows)} calculator rows"
+                      + (f"; {_before - len(todo)} skipped as brand/formulated/hazmat" if _before - len(todo) else "") + ").")
         return
     sess_box, details, updates, summary, blocked = [new_session()], [], [], [], 0
     for r in todo:
@@ -1701,13 +1925,14 @@ def build_pool(store, astore, hist, sig, last, targets):
     rejected, rows, chosen_all = [], [], []
     for name, chat, cats in targets:
         sub = sig2[slug.isin(cats)] if cats else sig2
-        ch = picks.select_picks(sub, n=BR_POOL_PER_GROUP if cats else BR_POOL_SIZE, max_per_cat=3,
-                                today=TODAY, rejected=rejected)
+        ch = select_mixed(sub, hist, last, BR_POOL_PER_GROUP if cats else BR_POOL_SIZE, rejected, max_per_cat=3)
         for i, (_, p) in enumerate(ch.iterrows(), 1):
             rows.append({"date": last, "group": name, "chat": chat, "order": i, "asin": p["asin"],
                          "title": str(p["title"])[:150], "category_slug": p.get("category_slug", ""),
                          "seasonal": p.get("seasonal", ""), "price_inr": p.get("price_inr", ""),
-                         "trend_score": p.get("trend_score", ""), "status": "pending", "posted_at": ""})
+                         "trend_score": p.get("trend_score", ""), "arm": p.get("arm", "momentum"),
+                         "durable_days": p.get("durable_days", ""), "durable_window": p.get("durable_window", ""),
+                         "median_rank": p.get("median_rank", ""), "status": "pending", "posted_at": ""})
         if not ch.empty:
             chosen_all.append(ch)
     _report_rejected(rejected)
@@ -1735,8 +1960,9 @@ def build_pool(store, astore, hist, sig, last, targets):
     send_telegram(_esc(wa_txt))
     hours = ", ".join(f"{h}:00" for h in DRIP_SLOTS_IST)
     send_telegram(f"🗓 <b>Today's post pool</b> ({last}): {len(pool)} picks · posting at {hours} IST\n"
-                  + "\n".join(f"{r['order']}. {_esc(r['title'][:60])}" + (f" → {_esc(r['group'])}" if len(targets) > 1 else "")
-                               for r in rows[:15]))
+                  + "\n".join(f"{r['order']}. {'🧱' if r.get('arm') == 'durable' else '📈'} {_esc(r['title'][:60])}"
+                               + (f" → {_esc(r['group'])}" if len(targets) > 1 else "") for r in rows[:15])
+                  + "\n🧱 durable (on the list most days) · 📈 momentum (climbing)")
     return pool
 
 
@@ -1902,7 +2128,9 @@ def main_drip():
         pool.loc[batch.index, "status"] = "posted"
         pool.loc[batch.index, "posted_at"] = stamp
         logs += [{"posted_at": stamp, "group": name, "chat": chat, "asin": r["asin"], "title": r["title"][:100],
-                  "link": picks.affiliate_link(r["asin"], AFFILIATE_TAG)} for _, r in batch.iterrows()]
+                  "link": picks.affiliate_link(r["asin"], AFFILIATE_TAG),
+                  "arm": r["arm"] if "arm" in r.index and str(r["arm"]) not in ("", "nan") else "momentum"}   # v1.51: join with AFF_ACTUALS by arm
+                 for _, r in batch.iterrows()]
         posted_total += len(batch)
     if not posted_total:
         log("Drip: today's pool is fully posted"); return
@@ -2100,13 +2328,13 @@ def main_discover():
         L += [f"• {_esc(r['name'][:55] or r['product_id'])} — {r['creators']} channels" for r in yt3[:6]]
     if tr:
         L.append("\n🔎 <b>Rising shopping searches</b>")
-        L += [f"• {_esc(r['name'][:50])} (+{int(float(r['trend_rise'])):,}%, day {r['days_seen']})" for r in tr[:6]]
+        L += [f"• {_esc(r['name'][:50])} ({fmt_rise(r['trend_rise'])}, day {r['days_seen']})" for r in tr[:6]]
     for lane, icon, label in (("skills", "🎓", "Skills & courses"), ("apps", "📱", "Apps & software")):
         lr = [r for r in today_rows if r.get("lane") == lane]
         if lr:
             ok = [r for r in lr if r["status"] == "2+ sources"]
             L.append(f"\n{icon} <b>{label}</b> — {len(lr)} rising, {len(ok)} confirmed by YouTube (admin only)")
-            L += [f"• {_esc(r['name'][:45])} (+{int(float(r['trend_rise'])):,}%"
+            L += [f"• {_esc(r['name'][:45])} ({fmt_rise(r['trend_rise'])}"
                   + (f", {r['creators']} channels" if int(r["creators"]) else "") + ")"
                   for r in (ok + [x for x in lr if x not in ok])[:5]]
     if lt["eligible"]:
@@ -2406,7 +2634,7 @@ def main_automation():
     by_src = {}
     for it in items:
         by_src[it["source"]] = by_src.get(it["source"], 0) + 1
-    L = [f"🛠 <b>What people want built</b> — week of {week} · v1.49 (admin only · for bizopstool)",
+    L = [f"🛠 <b>What people want built</b> — week of {week} · v{VERSION} (admin only · for bizopstool)",
          "Requests read: " + " · ".join(f"{k} {v}" for k, v in sorted(by_src.items())) + f" → {len(groups)} distinct needs"
          + (f" · focus words: {', '.join(BR_AUTO_FOCUS_WORDS)}" if BR_AUTO_FOCUS_WORDS else " · ⚠️ no focus words set (BR_AUTO_FOCUS_WORDS)")
          + ("" if BRAVE_API_KEY else " · web crowding: not checked (no BRAVE_API_KEY)")]
@@ -2848,14 +3076,18 @@ def main():
             log(f"Backup schedule: today's data ({TODAY}) already fetched — skipping (avoids extra Amazon requests)")
             return
     log("=" * 55)
-    log(f"📡 BAZAAR RADAR v1.49 — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
+    log(f"📡 BAZAAR RADAR v{VERSION} — {TODAY} IST · curl_cffi={HAS_CURL_CFFI}")
     log(f"Categories: {len(CATEGORIES)} · lists: {', '.join(LISTS)}")
     log("=" * 55)
     t0 = time.time()
     store = Store()
     written = {}
 
-    frames, amz_stats = fetch_amazon_lists()
+    try:
+        _h_prior = store.read(SHEET_HISTORY)
+    except Exception:
+        _h_prior = None
+    frames, amz_stats = fetch_amazon_lists(_h_prior)
     tab_map = {"bestsellers": "AMZ_BESTSELLERS", "movers": "AMZ_MOVERS", "new_releases": "AMZ_NEW_RELEASES"}
     for k, tab in tab_map.items():
         try: written[tab] = store.write(tab, frames[k])
@@ -2875,16 +3107,21 @@ def main():
 
     signals, heat = pd.DataFrame(), pd.DataFrame()
     try:
-        hist = update_history(store.read(SHEET_HISTORY), frames)
+        hist = update_history(_h_prior if _h_prior is not None else store.read(SHEET_HISTORY), frames)
         written[SHEET_HISTORY] = store.write(SHEET_HISTORY, hist)
         try:                                     # forward test: resolve pick/baseline ranks daily
             trk = store.read("PICKS")
             if not trk.empty:
                 trk = picks.update_tracking(trk, hist)
                 written["PICKS"] = store.write("PICKS", trk)
-                _sc = picks.scorecard(trk)
-                written["PICK_SCORECARD"] = store.write("PICK_SCORECARD", _sc)
-                PICK_LINE.append(picks.verdict(_sc, tracker=trk))
+                _fs = picks.arm_scorecard(trk)           # v1.50/1.51: hit AND alive, rank-matched, non-festival cohorts + 95% CI, per arm
+                written["PICK_SCORECARD"] = store.write("PICK_SCORECARD", _fs if not _fs.empty else picks.scorecard(trk))
+                _mv = picks.momentum_verdict(trk)        # the pre-registered verdict is about the momentum arm only
+                if _mv:
+                    PICK_LINE.append(_mv)
+                for _fl in (picks.fair_line(_fs), picks.durable_line(_fs)):
+                    if _fl:
+                        PICK_LINE.append(_fl)
         except Exception as exc:
             log_tb("pick tracking", exc)
         signals = compute_signals(hist, frames)
@@ -2922,12 +3159,16 @@ def main():
             signals["seasonal"] = [compliance.seasonal_flag(t) for t in signals["title"]]
             import season
             signals["season_window"] = [season.window(f, TODAY)["note"] for f in signals["seasonal"]]
-            import stock_gate
-            _g = stock_gate.gate_all(hist, signals, TODAY)
-            signals["stock_gate"] = [_g.get(str(a), "") for a in signals["asin"]]
             signals["competition"] = [compliance.competition_note(s_, b_) for s_, b_ in
                                       zip(signals.get("seller_offers", [None] * len(signals)),
                                           signals.get("bought_past_month_min", [None] * len(signals)))]
+            # v1.50: can a RESELLER source this? (brand / formulated / dangerous goods). Affiliate is unaffected.
+            _rg = [resell_gate.check(t, c) for t, c in zip(signals["title"], signals.get("category_slug", signals["category"]))]
+            signals["resell_ok"] = [r["ok"] for r in _rg]
+            signals["resell_note"] = [r["reason"] for r in _rg]
+            import stock_gate
+            _g = stock_gate.gate_all(hist, signals, TODAY)
+            signals["stock_gate"] = [_g.get(str(a), "") for a in signals["asin"]]
             written["TREND_SIGNALS"] = store.write("TREND_SIGNALS", signals)
     except Exception as exc:
         log_tb("compliance flags", exc)
@@ -2961,11 +3202,18 @@ def main():
             act = signals[signals["actionable"].astype(bool)] if "actionable" in signals else signals
             act = act[~act.get("category_slug", act["category"]).isin(BR_CALC_EXCLUDE)]
             act = act[act["title"].map(_has_title)]          # no title → can't search/quote it yet
+            if "resell_ok" in act:
+                _n0 = len(act)
+                act = act[act["resell_ok"].astype(str).str.lower() != "false"]
+                if _n0 - len(act):
+                    log(f"Calculator: {_n0 - len(act)} of {_n0} actionable signals are brand / formulated / dangerous-goods "
+                        f"items — affiliate-only, not queued for reselling")
             n_days = hist["date"].nunique() if "hist" in locals() and not hist.empty else 0
             if n_days < BR_CALC_MIN_DAYS:
                 log(f"Calculator: {n_days}/{BR_CALC_MIN_DAYS} days of history — not adding new rows yet "
                     f"(day-1 scores are ties); existing rows still refresh")
                 act = act.iloc[0:0]
+            act = calc_feed(act, BR_CALC_TOP_N, BR_CALC_DURABLE_N)
             written["CALCULATOR"] = store.update_calculator(
                 act.where(act.notna(), None).to_dict("records")[:BR_CALC_TOP_N],
                 signals.where(signals.notna(), None).to_dict("records"))
@@ -2987,7 +3235,7 @@ def main():
     except Exception as exc: log_tb("write RUN_LOG", exc)
 
     # ── Telegram digest
-    lines = [f"📡 <b>Bazaar Radar</b> v1.45 — {TODAY}",
+    lines = [f"📡 <b>Bazaar Radar</b> v{VERSION} — {TODAY}",
              f"Amazon lists: {amz_stats['ok']} ok · {amz_stats['blocked']} blocked"]
     if "signals" in locals() and not signals.empty and "stock_gate" in signals:
         sg = signals["stock_gate"].astype(str)
@@ -3011,8 +3259,40 @@ def main():
                 for a in pready[:5]:
                     line += f"\n  • {_esc(tmap.get(a, a)[:60])}"
         lines.append(line)
-    if PICK_LINE:
-        lines.append("🧪 " + _esc(PICK_LINE[-1]))
+    for _pl in PICK_LINE[-3:]:
+        lines.append("🧪 " + _esc(_pl))
+    if "signals" in locals() and not signals.empty and "stock_state" in signals:
+        _c = capture.summarize(signals["stock_state"])
+        _l = (f"🧾 <b>Stock check:</b> {_c.get('in_stock', 0)} priced today · {_c.get('carried', 0)} priced ≤"
+              f"{capture.STOCK_CARRY_DAYS}d ago (tail ranks) · {_c.get('unknown', 0)} unverified · {_c.get('unavailable', 0)} sold out")
+        if LAZY["state"] == "working":
+            _l += f"\n  🔬 below-the-fold fetch working: {LAZY['filled']} tail prices captured"
+        elif LAZY["state"] == "failed":
+            _l += "\n  🔬 below-the-fold fetch tested → failed (Amazon layout); using last-seen prices"
+        lines.append(_l)
+    if "signals" in locals() and not signals.empty and "resell_ok" in signals:
+        _ro = signals["resell_ok"].astype(str).str.lower() != "false"
+        lines.append(f"🏷 <b>Reselling lane:</b> {int(_ro.sum())} of {len(signals)} signals are sourceable "
+                     f"(the rest are brands / cosmetics / food / dangerous goods — affiliate only)")
+    if "signals" in locals() and not signals.empty and "durable" in signals:
+        _d = signals["durable"].astype(str).str.lower() == "true"
+        _fall = signals["exit_flag"].fillna("").astype(str) == "falling" if "exit_flag" in signals else pd.Series(False, index=signals.index)
+        _ro2 = (signals["resell_ok"].astype(str).str.lower() != "false") if "resell_ok" in signals else pd.Series(True, index=signals.index)
+        _se = signals["seasonal"].astype(str).str.startswith("SEASONAL") if "seasonal" in signals else pd.Series(False, index=signals.index)
+        _nbs = int(signals["bs_rank_today"].notna().sum()) if "bs_rank_today" in signals else len(signals)
+        lines.append(f"🧱 <b>Durable demand:</b> {int(_d.sum())} of {_nbs} bestseller-list products were on the lists most of the last "
+                     f"{durable.WINDOW} days · {int((_d & _ro2 & ~_fall & ~_se).sum())} of them sourceable, not falling, not seasonal "
+                     f"(on {int(_fall.sum())} products a 📉 fall has started)")
+        _ex = signals[_d & _fall].sort_values("durable_score", ascending=False)
+        if len(_ex):
+            lines.append("📉 <b>Exit watch</b> — durable products that have started falling:\n"
+                         + "\n".join(f"  • {_esc(str(r['title'])[:55])} — {_esc(r['exit_note'])}" for _, r in _ex.head(5).iterrows()))
+        try:
+            _fl = durable.fader_line(durable.fader_rates(hist))
+            if _fl:
+                lines.append("  <i>" + _esc(_fl) + "</i>")
+        except Exception as exc:
+            log_tb("fader rates", exc)
     if BAD_CATEGORIES:
         lines.append(f"⚠️ <b>Ignored in BR_CATEGORIES:</b> {_esc(', '.join(BAD_CATEGORIES))} — these are search words, "
                      f"not Amazon category slugs. Move them to <b>BR_SEED_KEYWORDS</b>.")
@@ -3082,7 +3362,7 @@ def main():
         lines.append("\n<b>Rising searches (Google, IN)</b>")
         rising = rising.groupby("seed", sort=False).head(2)          # variety: max 2 per seed keyword
         for _, r in rising.head(8).iterrows():
-            lines.append(f"• {_esc(r['query'])} <i>(via {_esc(r['seed'])}, +{r['value']}%)</i>")
+            lines.append(f"• {_esc(r['query'])} <i>(via {_esc(r['seed'])}, {fmt_rise(r['value'])})</i>")
     if amz_stats["ok"] == 0:
         lines.append(f"\n⚠️ All Amazon lists blocked. {_actions_url()}")
     lines.append(f"\n⏱ {time.time() - t0:.0f}s")

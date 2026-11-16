@@ -21,11 +21,66 @@ def _num(v):
         return None
 
 
+def _is(s, col, val="true"):
+    return s[col].astype(str).str.lower() == val if col in s else pd.Series(False, index=s.index)
+
+
+def durable_items(signals, n=6, per_cat=2, cat_names=None):
+    """v1.51: products that have been on a bestseller list most of the last 14 days — the part of the brief that is
+    backed by observation rather than by a one-week move. Sourceable only (no brands / cosmetics / food / hazmat),
+    not seasonal, not currently falling, not a bill-payment tile. → [(row, cname)]"""
+    s = signals.copy()
+    if "durable" not in s:
+        return []
+    s = s[_is(s, "durable")]
+    for col, bad in (("actionable", "false"), ("discount_driven", "true"), ("short_dip", "true"), ("resell_ok", "false")):
+        if col in s:
+            s = s[s[col].astype(str).str.lower() != bad]
+    if "exit_flag" in s:
+        s = s[s["exit_flag"].fillna("").astype(str) != "falling"]
+    if "seasonal" in s:
+        s = s[~s["seasonal"].astype(str).str.startswith("SEASONAL")]
+    if "non_product" in s:
+        s = s[s["non_product"].fillna("").astype(str).isin(["", "nan"])]
+    s = s[s["title"].astype(str).str.len() >= 4]
+    s["_d"] = pd.to_numeric(s.get("durable_score"), errors="coerce")
+    out, per = [], {}
+    for _, r in s.sort_values("_d", ascending=False).iterrows():
+        cat = r.get("category_slug") or r.get("category")
+        if per.get(cat, 0) >= per_cat:
+            continue
+        per[cat] = per.get(cat, 0) + 1
+        out.append((r, (cat_names or {}).get(cat, cat)))
+        if len(out) >= n:
+            break
+    return out
+
+
+def exit_watch(signals, n=5, cat_names=None):
+    """v1.51: durable products that have just started falling — the early part of leaving the lists.
+    → [(row, cname)]"""
+    s = signals.copy()
+    if "durable" not in s or "exit_flag" not in s:
+        return []
+    s = s[_is(s, "durable") & (s["exit_flag"].fillna("").astype(str) == "falling")]
+    if "non_product" in s:
+        s = s[s["non_product"].fillna("").astype(str).isin(["", "nan"])]
+    s["_d"] = pd.to_numeric(s.get("durable_score"), errors="coerce")
+    return [(r, (cat_names or {}).get(r.get("category_slug") or r.get("category"), r.get("category")))
+            for _, r in s.sort_values("_d", ascending=False).head(n).iterrows()]
+
+
 def rising(signals, hist, today, n=5, picks_mod=None, cat_names=None):
     s = signals.copy()
     for col, bad in (("actionable", "false"), ("discount_driven", "true"), ("short_dip", "true")):
         if col in s:
             s = s[s[col].astype(str).str.lower() != bad]
+    if "resell_ok" in s:                                    # v1.51: the brief is for sellers — brands / cosmetics / food / hazmat are not theirs to source
+        s = s[s["resell_ok"].astype(str).str.lower() != "false"]
+    if "exit_flag" in s:                                    # v1.51: a product that just fell is not "rising"
+        s = s[s["exit_flag"].fillna("").astype(str) != "falling"]
+    if "non_product" in s:
+        s = s[s["non_product"].fillna("").astype(str).isin(["", "nan"])]
     seas = s.get("seasonal", pd.Series([""] * len(s), index=s.index)).astype(str).str.startswith("SEASONAL")
     s["_score"] = pd.to_numeric(s["trend_score"], errors="coerce")
     main = s[~seas].sort_values("_score", ascending=False)
@@ -43,10 +98,13 @@ def rising(signals, hist, today, n=5, picks_mod=None, cat_names=None):
     return out, seasonal
 
 
-def build(signals, heat, scorecard_line, hist, today, picks_mod, cat_names, weeks_tracked=0, early=None, ready=None):
+def build(signals, heat, scorecard_line, hist, today, picks_mod, cat_names, weeks_tracked=0, early=None, ready=None, fader=""):
     """early: [(name, sources)] found by Google Trends/YouTube before Amazon ranked them (2+ sources).
-    ready: [(title, gate_note)] products that held their rank 2–3 weeks (stock gate passed)."""
+    ready: [(title, gate_note)] products that held their rank 2–3 weeks (stock gate passed).
+    fader: durable.fader_line(...) — observed leave-rates after a fall, '' when there is not enough history."""
     items, seasonal = rising(signals, hist, today, picks_mod=picks_mod, cat_names=cat_names)
+    lasting = durable_items(signals, cat_names=cat_names)
+    fading = exit_watch(signals, cat_names=cat_names)
     css = ("body{font-family:Arial,Helvetica,sans-serif;max-width:720px;margin:24px auto;padding:0 16px;color:#1d1d1f;"
            "line-height:1.45}h1{font-size:22px;margin-bottom:4px}h2{font-size:17px;margin-top:28px;border-bottom:1px solid #ddd;"
            "padding-bottom:4px}.muted{color:#6e6e73;font-size:13px}.card{border:1px solid #e3e3e6;border-radius:8px;padding:12px 14px;"
@@ -62,7 +120,27 @@ def build(signals, heat, scorecard_line, hist, today, picks_mod, cat_names, week
              + (H(scorecard_line) if scorecard_line else "Building: picks are tracked against random same-category "
                 "products for 7/14/28 days. Results appear here once enough picks have matured.")
              + f"<div class='muted'>Weeks tracked: {weeks_tracked}. Every past pick and its outcome is logged — ask for the full list.</div></div>",
-             "<h2>Rising this week</h2>"]
+             ]
+    if lasting:
+        parts.append("<h2>Lasting demand</h2><p class='muted'>On an Amazon.in bestseller list on most of the last 14 days, at a "
+                     "real rank, not falling. This is observed presence, not a forecast. It also means other sellers already "
+                     "sell it — check margin and competition before buying stock. Rank is not sales.</p>")
+        for r, cname in lasting:
+            note = str(r.get("durable_note", "") or "")
+            comp = str(r.get("competition", "") or "")
+            parts.append(f"<div class='card'><b>{H(str(r['title'])[:120])}</b><br><span class='why'>🧱 {H(note) if note and note != 'nan' else 'On the list most days'}</span>"
+                         f"<br><span class='muted'>{H(cname)}</span>"
+                         + (f"<br><span class='muted'>{H(comp)}</span>" if comp and comp != "nan" else "")
+                         + (f"<br><span class='muted'>Compliance: {H(r['compliance'])}</span>"
+                            if str(r.get("compliance", "")).startswith("REVIEW") else "")
+                         + f"<br><a href='https://www.amazon.in/dp/{H(r['asin'])}'>View on Amazon.in</a></div>")
+    if fading:
+        parts.append("<h2>Exit watch</h2><p class='muted'>Products that were steady and have just lost 10+ places in 3 days. "
+                     "Think twice before ordering stock on these.</p><ul>"
+                     + "".join(f"<li>{H(str(r['title'])[:90])} — {H(str(r.get('exit_note', '')))}</li>" for r, _ in fading)
+                     + "</ul>" + (f"<p class='muted'>{H(fader)}</p>" if fader else ""))
+    parts.append("<h2>Rising this week</h2><p class='muted'>Climbs are the noisiest signal here — in our own history a one-week "
+                 "climb said little about being on the list a week later. Treat these as things to watch, not to stock.</p>")
     if not items:
         parts.append("<p>No qualifying products yet (needs ≥ 7 days of rank history).</p>")
     for r, f, cname in items:
@@ -109,5 +187,6 @@ def build(signals, heat, scorecard_line, hist, today, picks_mod, cat_names, week
                  "<b>yes / no</b> and the <b>monthly price</b> you'd pay — and which section was most useful.</div>"
                  "</body></html>")
     text = (f"📰 India E-commerce Trend Brief — week of {today}\n{scorecard_line or 'Track record: building'}\n"
-            + "\n".join(f"• {str(r['title'])[:70]}" for r, _, _ in items))
+            + ("\n🧱 Lasting: " + "; ".join(str(r["title"])[:40] for r, _ in lasting[:3]) if lasting else "")
+            + "\n" + "\n".join(f"• {str(r['title'])[:70]}" for r, _, _ in items))
     return "".join(parts), text

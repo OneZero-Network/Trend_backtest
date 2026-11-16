@@ -20,7 +20,7 @@ for i, d in enumerate(days):
     for c in CATS:
         for k in range(1, 101):
             H.append({"date": d, "list": "bestsellers", "category_slug": c, "asin": f"{c[:1].upper()}{k:08d}",
-                      "rank": k, "price_inr": "199", "rating": "", "reviews": "", "title": f"{c} item {k}"})
+                      "rank": k if i >= 5 else min(k + 30, 100), "price_inr": "199", "rating": "", "reviews": "", "title": f"{c} item {k}"})
 pd.DataFrame(H).to_csv(os.path.join(TMP, "HISTORY.csv"), index=False)
 sig = pd.DataFrame([{"asin": f"{c[:1].upper()}{k:08d}", "title": f"{c} item {k}", "category_slug": c,
                      "trend_score": 100 - k - j * 0.1, "rank_change": 30, "price_inr": "199", "seasonal": "",

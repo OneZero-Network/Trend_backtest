@@ -95,3 +95,15 @@ def window(seasonal_flag, today):
         if worst is None or (r["affiliate_ok"], r["stock_ok"]) < (worst["affiliate_ok"], worst["stock_ok"]):
             worst = r
     return worst
+
+
+def near_festival(day, days=10):
+    """→ name of a festival within ±`days` of `day` ('' if none). Used to keep festival-week pick days out of the
+    forward-test comparison: a Diwali-week pick is expected to fade after Diwali whatever the trend score said."""
+    d = _d(day)
+    for name, dates in FESTIVALS.items():
+        if name == "Festive decor":                 # duplicates Diwali/Christmas dates
+            continue
+        if any(abs((_d(x) - d).days) <= days for x in dates):
+            return name
+    return ""

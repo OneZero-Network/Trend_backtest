@@ -54,8 +54,13 @@ def about_seed(query, seed):
     q = set(re.findall(r"[a-z0-9]+", str(query).lower()))
     words = [w for w in re.findall(r"[a-z0-9]+", str(seed).lower()) if len(w) >= 3] or [str(seed).lower()]
     return any(w in q or any(t.startswith(w[:5]) for t in q if len(w) >= 6) for w in words)
-SNOWBALL_DAYS = 7
+SNOWBALL_DAYS = 5                   # v1.50: 7 → 5 (a seed that has not risen again within 5 days is dropped)
 MAX_SNOWBALL = 8
+MIN_SEED_HITS = 2                   # v1.50: a rising search must rise on 2 SEPARATE days before it becomes a seed
+MAX_GROW_PER_LANE = 2               # v1.50: growing seeds per lane per run (was 3, and they ran FIRST)
+MAX_SEED_ROWS_PER_LANE = 30         # v1.50: DISC_SEEDS stays bounded
+MAX_SEED_WORDS = 3                  # seeds are generic nouns ("air purifier"), not brand+model strings
+RISE_CAP = 5000.0                   # % — Google's "Breakout" level; +128,650% from a tiny base is not 25× stronger
 MIN_RISE = 250                      # % rise; "Breakout" counts. Huge % from ~0 is filtered by 2-day persistence
 
 SHOP_WORDS = re.compile(r"\b(flipkart|amazon|meesho|myntra|ajio|nykaa|online|buy|shopping|sale|offer|offers|"
@@ -126,9 +131,9 @@ def is_product_phrase(q, lane="products"):
 def rise_value(v):
     s = str(v).lower()
     if "breakout" in s:
-        return 5000.0
+        return RISE_CAP
     try:
-        return float(s.replace("%", "").replace(",", "").replace("+", ""))
+        return min(float(s.replace("%", "").replace(",", "").replace("+", "")), RISE_CAP)
     except ValueError:
         return 0.0
 
@@ -138,9 +143,14 @@ LEARN_WORDS = re.compile(r"\b(course|courses|class|classes|coaching|tutorial|tut
                          r"syllabus|notes|in hindi|full course|bootcamp|practice|exercises?)\b", re.I)
 
 
+MODEL_NO = re.compile(r"\b(?:[a-z]{2,}\d{2,}[a-z0-9]*|\d{2,}[a-z]{2,}\d*)\b", re.I)    # hp8143, hd3151, 66cm
+
+
 def seed_ok(seed, lane, today):
-    """A growing seed must still pass today's filters (lane rules, bans, season window)."""
+    """A growing seed must still pass today's filters (lane rules, bans, season window, no model numbers)."""
     if not is_product_phrase(seed, lane):
+        return False
+    if MODEL_NO.search(str(seed)) or len(str(seed).split()) > MAX_SEED_WORDS:
         return False
     if lane == "products":
         import compliance, season
@@ -161,27 +171,50 @@ def active_seeds(seed_rows, today, base=BASE_SEEDS, lane="products"):
             age = (t - datetime.fromisoformat(last[:10])).days
         except ValueError:
             continue
-        if 0 <= age <= SNOWBALL_DAYS and r["seed"] not in base and r["seed"] not in live \
+        try:
+            hits = int(float(r.get("hits") or 1))             # rows from before v1.50 have no count → 1 → inactive
+        except ValueError:
+            hits = 1
+        if 0 <= age <= SNOWBALL_DAYS and hits >= MIN_SEED_HITS and r["seed"] not in base and r["seed"] not in live \
                 and seed_ok(r["seed"], lane, today):          # re-checked daily: yesterday's noise can't come back
             live.append(r["seed"])
-    # up to 3 growing seeds go FIRST (the daily per-lane cap would otherwise cut them), then today's slice
-    grow = [s for s in live if s not in base][:3]
+    # a few growing seeds go FIRST (the daily per-lane cap would otherwise cut them), then today's slice
+    grow = [s for s in live if s not in base][:MAX_GROW_PER_LANE]
     return grow + [b for b in base if b not in grow]
 
 
 def update_seeds(seed_rows, trend_rows, today):
-    """Strong product phrases found today become seeds (or refresh their last_rising)."""
+    """Strong, specific, on-topic rising searches become CANDIDATE seeds; a candidate is used only after it has
+    risen on MIN_SEED_HITS separate days. Why: week 3 fed back 'namjooning stanford', 'mehul sir tuition ahmedabad',
+    'burmese python concrete pipe nest', 'megaa click', 'badakit wiki' — a one-day spike became a seed, ran FIRST
+    in every run and burned the Trends request budget (and the 429s)."""
     by = {(str(r.get("lane") or "products"), r["seed"]): dict(r, lane=str(r.get("lane") or "products"))
           for r in (seed_rows or [])}
     for r in trend_rows:
         p, lane = r["phrase"], r.get("lane", "products")
-        if r["rise"] >= 1000 and len(p.split()) >= 2:
-            if (lane, p) in by:
-                by[(lane, p)]["last_rising"] = today
-            else:
-                by[(lane, p)] = {"seed": p, "added": today, "last_rising": today, "lane": lane}
+        if r["rise"] < 1000 or len(p.split()) < 2:
+            continue
+        if not seed_ok(p, lane, today) or not about_seed(p, r.get("seed", "")):
+            continue
+        key = (lane, p)
+        if key in by:
+            row = by[key]
+            if str(row.get("last_rising")) != today:          # a NEW day → one more hit
+                try:
+                    row["hits"] = int(float(row.get("hits") or 1)) + 1
+                except ValueError:
+                    row["hits"] = 2
+            row["last_rising"] = today
+        else:
+            by[key] = {"seed": p, "added": today, "last_rising": today, "lane": lane, "hits": 1}
     cutoff = (datetime.fromisoformat(today) - timedelta(days=30)).strftime("%Y-%m-%d")
-    return [r for r in by.values() if max(str(r.get("added")), str(r.get("last_rising"))) >= cutoff]
+    keep = [r for r in by.values() if max(str(r.get("added")), str(r.get("last_rising"))) >= cutoff]
+    out = []
+    for lane in {r["lane"] for r in keep}:                    # bounded per lane, most recent first
+        rows = sorted((r for r in keep if r["lane"] == lane),
+                      key=lambda r: max(str(r.get("added")), str(r.get("last_rising"))), reverse=True)
+        out += rows[:MAX_SEED_ROWS_PER_LANE]
+    return out
 
 
 def relevant(q, seed, lane):

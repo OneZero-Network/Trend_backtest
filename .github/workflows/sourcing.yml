@@ -35,6 +35,9 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           BR_SOURCING_TOP_N:  ${{ vars.BR_SOURCING_TOP_N || '20' }}
+          BR_RESELL_GATE:        ${{ vars.BR_RESELL_GATE }}          # 0 = off (default on): brands / formulated / hazmat stay affiliate-only
+          BR_BRANDS_EXTRA:       ${{ vars.BR_BRANDS_EXTRA }}         # comma list of extra brand names to block from reselling
+          BR_RESELL_ALLOW_CATS:  ${{ vars.BR_RESELL_ALLOW_CATS }}    # e.g. beauty — lets a category back into the reselling lane
           BR_SOURCING_RECHECK_DAYS: ${{ github.event.inputs.recheck_days || '7' }}
         run: python trend_fetcher.py
       - name: Save run output

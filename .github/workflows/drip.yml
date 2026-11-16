@@ -39,4 +39,5 @@ jobs:
           BR_FLIPKART_HOUR:    ${{ vars.BR_FLIPKART_HOUR || '19' }}
           AFFILIATE_GROUPS:    ${{ secrets.AFFILIATE_GROUPS }}
           BR_POOL_SIZE:        ${{ vars.BR_POOL_SIZE || '12' }}
+          BR_DURABLE_SHARE:    ${{ vars.BR_DURABLE_SHARE || '0.67' }}   # share of public picks from the durable arm (0 = momentum only, 1 = durable only)
         run: python trend_fetcher.py

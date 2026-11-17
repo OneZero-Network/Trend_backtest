@@ -108,7 +108,7 @@ run_at("2026-11-12", 19)
 fk_pub = [m for c, _, m in sent if c == "@onezerodeals" and "shop on Flipkart" in m]
 draft = [m for c, _, m in sent if c == "ADMIN" and "Flipkart lane — DRAFT" in m]
 check("no Affiliate ID / lead test not passed → admin DRAFT only, nothing public", not fk_pub and draft and "FLIPKART_AFFID not set" in draft[0])
-check("Amazon slot still posts in the same run (separate log)", any(c == "@onezerodeals" and "Hidden Amazon Finds" in m for c, _, m in sent))
+check("Amazon slot still posts in the same run (separate log)", any(c == "@onezerodeals" and "Amazon Hidden Bestsellers" in m for c, _, m in sent))
 os.remove(os.path.join(TMP, "FK_POST_LOG.csv"))
 sent.clear(); tf.FLIPKART_AFFID = "onezero123"; tf.BR_FLIPKART_FORCE = True
 tf.NOW_IST = datetime(2026, 11, 12, 21, 35, tzinfo=IST); tf.main_drip()

@@ -58,7 +58,7 @@ except ImportError:
     cffi_requests = None
     HAS_CURL_CFFI = False
 
-VERSION = "1.51"        # the ONE place the version lives (digest header, log banner, Tool Watch digest)
+VERSION = "1.52"        # the ONE place the version lives (digest header, log banner, Tool Watch digest)
 IST = timezone(timedelta(hours=5, minutes=30))
 NOW_IST = datetime.now(IST)
 TODAY = NOW_IST.strftime("%Y-%m-%d")

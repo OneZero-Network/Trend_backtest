@@ -428,8 +428,12 @@ def _verdict_core(sc, min_resolved=40):
     return f"Forward test (14d): picks {p['hit_rate']:.0%} vs random {b['hit_rate']:.0%} → {lift:.2f}× ({tone})."
 
 
+import os as _os0
+POST_TITLE = (_os0.environ.get("AFF_POST_TITLE") or "Amazon Hidden Bestsellers").strip()   # channel post title
+
+
 def post_text(picks, tag, week_label, scorecard_line=""):
-    lines = [f"🔍 Hidden Amazon Finds — {week_label}", "Products climbing Amazon.in's bestseller lists this week:", ""]
+    lines = [f"🔍 {POST_TITLE} — {week_label}", ""]
     for i, (_, p) in enumerate(picks.iterrows(), 1):
         seas = f" ({p['seasonal'].replace('SEASONAL: ', '')})" if str(p.get("seasonal", "")).startswith("SEASONAL") else ""
         lines.append(f"{i}. {str(p['title'])[:90]}{seas}\n   {affiliate_link(p['asin'], tag)}")
@@ -493,14 +497,20 @@ def _durable(f):
 
 
 def _icon(f):
-    return "🧱" if _durable(f) else "📈"
+    return "🏆" if _durable(f) else "📈"
+
+
+def _days_on_list(f):
+    """'14 days on the list' when it was there every observed day, else '13 of 14 days on the list'."""
+    d, w = f["dur_days"], f["dur_window"]
+    return f"{d} days on the list" if d == w else f"{d} of {w} days on the list"
 
 
 def trend_line(f, cat_name):
     now, then = f["rank_now"], f["rank_then"]
     if _durable(f):
-        at = f" · now <b>#{int(now)}</b>" if now is not None and not pd.isna(now) else ""
-        return f"🧱 On the list <b>{f['dur_days']} of the last {f['dur_window']} days</b> in {cat_name}{at}"
+        at = f"<b>#{int(now)}</b> in " if now is not None and not pd.isna(now) else ""
+        return f"🏆 {at}{cat_name} · {_days_on_list(f)}"
     if now is None or pd.isna(now):
         head = f"Trending in {cat_name}"
     elif then is None or pd.isna(then):
@@ -532,8 +542,8 @@ def short_title(t, n=60):
 def _compact_line(f):
     now, then = f["rank_now"], f["rank_then"]
     if _durable(f):
-        at = f" · now #{int(now)}" if now is not None and not pd.isna(now) else ""
-        return f"on the list {f['dur_days']} of the last {f['dur_window']} days{at}"
+        at = f"#{int(now)} · " if now is not None and not pd.isna(now) else ""
+        return f"{at}{_days_on_list(f)}"
     if now is None or pd.isna(now):
         return "trending"
     if then is None or pd.isna(then):
@@ -557,19 +567,16 @@ def post_messages(picks_df, hist, tag, today, cat_names=None, week_label="", sty
         items.append((climb, p, f, cat_names.get(cat, cat)))
     items.sort(key=lambda x: x[0], reverse=True)
     if style == "single":
-        lines = [f"🔍 <b>Hidden Amazon Finds</b> — {_h(week_label)}",
-                 "On Amazon.in's bestseller lists (tracked daily): new, climbing or holding. Tap a name for today's price.", ""]
+        lines = [f"🔍 <b>{_h(POST_TITLE)}</b> — {_h(week_label)}", ""]
         for i, (_, p, f, cname) in enumerate(items, 1):
             seas = str(p.get("seasonal", ""))
             tag_s = f" · 📅 {_h(seas.replace('SEASONAL: ', ''))}" if seas.startswith("SEASONAL") else ""
             lines.append(f"{i}. <a href=\"{_h(affiliate_link(p['asin'], tag))}\">{_h(short_title(p['title']))}</a>\n"
                          f"    {_icon(f)} {_h(cname)} · {_compact_line(f)}{tag_s}")
-        if any(_durable(f) for _, _, f, _ in items):
-            lines += ["", "🧱 = steady on the list most days · 📈 = climbing or new"]
         lines += ["", f"<i>{_h(DISCLOSURE)}</i>"]
         return ["\n".join(lines)]
-    header = (f"🔍 <b>Hidden Amazon Finds</b> — {_h(week_label)}\n"
-              f"{len(items)} products climbing Amazon.in bestseller lists, picked from daily rank tracking.\n\n"
+    header = (f"🔍 <b>{_h(POST_TITLE)}</b> — {_h(week_label)}\n"
+              f"{len(items)} products from Amazon.in's bestseller lists, picked from daily rank tracking.\n\n"
               f"<i>{_h(DISCLOSURE)}</i>")
     msgs = [header]
     for _, p, f, cname in items:
@@ -591,8 +598,8 @@ X_LIMIT = 280
 def _plain_line(f, cname):
     now, then = f["rank_now"], f["rank_then"]
     if _durable(f):
-        at = f" (now #{int(now)})" if now is not None and not pd.isna(now) else ""
-        return f"On the list {f['dur_days']} of the last {f['dur_window']} days in {cname}{at}"
+        at = f"#{int(now)} in " if now is not None and not pd.isna(now) else ""
+        return f"{at}{cname} · {_days_on_list(f)}"
     if now is None or pd.isna(now):
         return f"Trending in {cname}"
     if then is None or pd.isna(then):
@@ -651,7 +658,7 @@ def share_kit(picks_df, hist, tag, today, cat_names=None):
 def wa_bundle(picks_df, hist, tag, today, cat_names=None, n=5, label=""):
     """ONE WhatsApp post with the day's top picks. WhatsApp can't hyperlink words, so every product
     gets its full link on its own line (WhatsApp makes it tappable)."""
-    lines = [f"*🔍 OneZero Deals — {label or today}*", "On Amazon.in's bestseller lists today (new, climbing or holding):", ""]
+    lines = [f"*🔍 OneZero Deals — {label or today}*", ""]
     for i, (_, p) in enumerate(picks_df.head(n).iterrows(), 1):
         cat = p.get("category_slug") or p.get("category")
         f = facts_for(p, hist, today)

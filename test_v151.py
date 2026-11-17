@@ -214,27 +214,32 @@ mo_row = {"asin": "CP00000002", "title": "Foam Roller", "category_slug": "kitche
 batch = pd.DataFrame([pd_row, mo_row])
 msg = picks.post_messages(batch, hist_c, "tag-21", TODAY, cat_names={"kitchen": "Home & Kitchen"}, week_label="test")[0]
 n_real, w_real = int(real.loc["CP00000001", "durable_days"]), int(real.loc["CP00000001", "durable_window"])
-check("copy: durable pick says 'on the list N of the last M days' with the numbers we observed",
-      f"on the list {n_real} of the last {w_real} days" in msg, msg)
+days_txt = f"{n_real} days on the list" if n_real == w_real else f"{n_real} of {w_real} days on the list"
+check("copy: durable pick says '<N> days on the list' (or 'N of M') with the numbers we observed, plus its rank",
+      f"#12 · {days_txt}" in msg and "of the last" not in msg, msg)
 check("copy: the N in the sentence equals the days that item really is in HISTORY",
       n_real == hist_c[(hist_c.asin == "CP00000001") & hist_c.date.isin(days[-w_real:])]["date"].nunique(), (n_real, w_real))
 check("copy: a momentum pick keeps its rank-move line and has no durable wording", "#60 → #40" in msg or "#" in msg.split("Foam Roller")[1][:120])
-check("copy: legend explains 🧱 / 📈 only when a durable pick is in the post",
-      "🧱 = steady on the list most days" in msg
-      and "🧱 =" not in picks.post_messages(pd.DataFrame([mo_row]), hist_c, "t", TODAY, cat_names={}, week_label="x")[0])
+check("copy: no explainer sentence, no legend line, new title (v1.51 user feedback)",
+      "Tap a name" not in msg and "tracked daily" not in msg and "🧱 =" not in msg and "Hidden Amazon Finds" not in msg
+      and "bestseller lists today" not in picks.wa_bundle(batch, hist_c, "t", TODAY, cat_names={})[0]
+      and msg.startswith("🔍 <b>Amazon Hidden Bestsellers</b> — test\n\n1."), msg[:160])
+check("copy: durable line is short — rank, category, days, and no 'last' wording; icon is 🏆", "🏆 Home &amp; Kitchen · #12 · " in msg and len(next(l for l in msg.split("\n") if "🏆" in l)) < 60, msg)
 check("copy: no price, no 'best' / 'trending now' / forecast words in a durable post",
       not re.search(r"₹|\bbest\b|\bwill\b|\bhot\b|going viral|trending now", msg, re.I), msg)
 w_txt = picks.wa_bundle(batch, hist_c, "tag-21", TODAY, cat_names={"kitchen": "Home & Kitchen"})[0]
 x_txt = picks.x_text(pd_row, picks.facts_for(pd_row, hist_c, TODAY), "Home & Kitchen", "tag-21")
 check("copy: WhatsApp and X carry the same provable sentence, X stays within its limit",
-      f"On the list {n_real} of the last {w_real} days" in w_txt and f"On the list {n_real} of the last {w_real} days" in x_txt
+      f"#12 in Home & Kitchen · {days_txt}" in w_txt and f"#12 in Home & Kitchen · {days_txt}" in x_txt
       and picks.x_weight(x_txt) <= picks.X_LIMIT, x_txt)
 bare = {k: v for k, v in pd_row.items() if k not in ("durable_days", "durable_window")}
 check("copy: a durable row without the counts recomputes them from HISTORY (never invents a number)",
-      f"on the list {n_real} of the last {w_real} days" in picks.post_messages(pd.DataFrame([bare]), hist_c, "t", TODAY, cat_names={}, week_label="x")[0])
+      days_txt in picks.post_messages(pd.DataFrame([bare]), hist_c, "t", TODAY, cat_names={}, week_label="x")[0])
 check("copy: pool rows read back as strings ('14.0', 'nan') are handled",
-      "on the list 14 of the last 14 days" in picks.post_messages(pd.DataFrame([{**pd_row, "durable_days": "14.0", "durable_window": "14.0"}]),
-                                                                  hist_c, "t", TODAY, cat_names={}, week_label="x")[0])
+      "14 days on the list" in picks.post_messages(pd.DataFrame([{**pd_row, "durable_days": "14.0", "durable_window": "14.0"}]),
+                                                    hist_c, "t", TODAY, cat_names={}, week_label="x")[0]
+      and "13 of 14 days on the list" in picks.post_messages(pd.DataFrame([{**pd_row, "durable_days": "13", "durable_window": "14"}]),
+                                                              hist_c, "t", TODAY, cat_names={}, week_label="x")[0])
 
 # ══ 7. calculator feed + sort ═════════════════════════════════════════════════════
 act = pd.DataFrame([S(f"T{i}", dur=False, ts=90 - i, seasonal="") for i in range(6)]

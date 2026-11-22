@@ -1,0 +1,46 @@
+name: Bazaar Radar — Growth snapshot (daily) + review (Mondays)
+
+# v1.60. Counts what the plan's kill lines need: channel members, joins per invite link, bot use, X spend.
+# Mondays it also sends the kill-line review and the goal worked backwards to the admin chat.
+# No Amazon requests. Telegram + Google Sheets only (~20 s). Times are UTC: 16:30 UTC = 22:00 IST.
+on:
+  schedule:
+    - cron: "30 16 * * *"
+  workflow_dispatch:
+    inputs:
+      report:
+        description: "Send the weekly review now (1 = yes)"
+        required: false
+        default: "0"
+
+concurrency:
+  group: growth
+  cancel-in-progress: false
+
+jobs:
+  growth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests pandas beautifulsoup4 gspread google-auth openpyxl
+      - name: Growth snapshot
+        env:
+          BR_MODE:             growth
+          BR_GROWTH_REPORT:    ${{ github.event.inputs.report || '0' }}
+          GOOGLE_CREDS_JSON:   ${{ secrets.GOOGLE_CREDS_JSON }}
+          GOOGLE_SHEET_ID:     ${{ secrets.GOOGLE_SHEET_ID }}
+          AFFILIATE_SHEET_ID:  ${{ secrets.AFFILIATE_SHEET_ID }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+          AFFILIATE_TAG:       ${{ secrets.AFFILIATE_TAG }}
+          AFFILIATE_CHAT_ID:   ${{ secrets.AFFILIATE_CHAT_ID }}
+          AFFILIATE_BOT_TOKEN: ${{ secrets.AFFILIATE_BOT_TOKEN }}
+          AFF_TAGS:            ${{ vars.AFF_TAGS }}               # telegram=…-21, whatsapp=…-21, x=…-21, bot=…-21
+          BR_GOAL_INR:         ${{ vars.BR_GOAL_INR || '50000' }}
+          WORKER_STATS_URL:    ${{ vars.WORKER_STATS_URL }}       # https://<worker>.workers.dev/stats (only once the shopper bot's webhook is set)
+          WORKER_KEY:          ${{ secrets.WORKER_KEY }}          # the Worker's RUN_KEY
+        run: python trend_fetcher.py

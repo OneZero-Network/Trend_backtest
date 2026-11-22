@@ -41,4 +41,20 @@ jobs:
           BR_POOL_SIZE:        ${{ vars.BR_POOL_SIZE || '12' }}
           AFF_POST_TITLE:      ${{ vars.AFF_POST_TITLE || 'Amazon Hidden Bestsellers' }}   # title line of every channel post
           BR_DURABLE_SHARE:    ${{ vars.BR_DURABLE_SHARE || '0.67' }}   # share of public picks from the durable arm (0 = momentum only, 1 = durable only)
+          # v1.60 growth machine — everything that costs money is OFF until you set it
+          AFF_TAGS:            ${{ vars.AFF_TAGS }}               # one tracking ID per channel: telegram=…-21, whatsapp=…-21, x=…-21, bot=…-21
+          WA_CHANNEL_URL:      ${{ vars.WA_CHANNEL_URL }}         # your WhatsApp Channel link (goes in the WhatsApp footer)
+          AFF_WA_HOURS:        ${{ vars.AFF_WA_HOURS }}           # extra WhatsApp-ready batches at these IST hours (the daily one is always sent)
+          BR_ROUNDUP_HOUR:     ${{ vars.BR_ROUNDUP_HOUR || '11' }}   # Sunday "lasting bestsellers" post
+          BR_POLL_HOUR:        ${{ vars.BR_POLL_HOUR || '19' }}      # Wednesday poll (0 = off)
+          AFF_X_MODE:          ${{ vars.AFF_X_MODE || 'off' }}       # off | dry | linkfree | links
+          AFF_X_MAX_PER_DAY:   ${{ vars.AFF_X_MAX_PER_DAY || '4' }}
+          AFF_X_BUDGET_USD:    ${{ vars.AFF_X_BUDGET_USD || '10' }}  # per calendar month; ALSO set a spend limit in the X console
+          X_API_KEY:           ${{ secrets.X_API_KEY }}
+          X_API_SECRET:        ${{ secrets.X_API_SECRET }}
+          X_ACCESS_TOKEN:      ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_SECRET:     ${{ secrets.X_ACCESS_SECRET }}
+          AFF_COPY_AGENT:      ${{ vars.AFF_COPY_AGENT }}         # 'claude' = rewrite X hooks for variety (fact-checked); empty = templates only
+          AFF_COPY_MODEL:      ${{ vars.AFF_COPY_MODEL || 'claude-haiku-5-5' }}
+          ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
         run: python trend_fetcher.py

@@ -60,6 +60,7 @@ jobs:
         run: |
           [ -d output/archive ] || { echo "No archive files this run"; exit 0; }
           A=$(mktemp -d) && cp -r output/archive/. "$A"/
+          B=$(mktemp -d) && { [ -d output/bot ] && cp -r output/bot/. "$B"/ || true; }    # v1.60 shopper bot's daily index
           git config user.name  "bazaar-radar-bot"
           git config user.email "bazaar-radar-bot@users.noreply.github.com"
           if git ls-remote --exit-code --heads origin data-archive >/dev/null 2>&1; then
@@ -73,6 +74,7 @@ jobs:
           fi
           mkdir -p archive && cp -r "$A"/. archive/
           git add archive
+          if [ -n "$(ls -A "$B")" ]; then mkdir -p bot && cp -r "$B"/. bot/ && git add bot; fi
           git commit -m "archive $(date -u +%F)" || echo "Nothing new to archive"
           git push origin data-archive
 

@@ -130,6 +130,94 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.80: done-for-you sourcing & margin audits, published Easy Ship fees, a savings & cards funnel (22 Nov)
+
+**Why.** Keepa already shows Amazon.in sales-rank history, so rank history alone is not our edge. What Keepa cannot
+give an Indian seller is *verified supplier quotes turned into a landed Easy Ship margin*. That is now a paid product:
+the **Sourcing & Margin Audit** (₹10,000 per product, ₹20,000 per category up to 5 products, 50% advance). And the
+channel gets a second earning lane that pays more per conversion than Amazon's ~₹15: EarnKaro deals and bank card
+referrals (EarnKaro lists ₹350–₹2,975 per activated card), capped and judged per post.
+
+### What is new
+| File | What it does |
+|---|---|
+| `fees.py` | Amazon's published weight-handling table (Standard STEP, from 16 Mar 2026, ex-GST): Easy Ship ₹55 / 75 / 112 / +₹34 per kg to 5 kg / +₹18 per kg after; fulfilment-centre regional and national too. Chargeable weight = higher of actual and L×B×H÷5000. Replaces the v1.70 rough estimate. |
+| `quotes.py` | RFQ text (every question a landed cost needs, brand-free) · `/quote` parsing · landed cost per unit (with or without GST registration) · every supplier at the target price: fees, weight fee on chargeable weight, returns, profit, margin, cash at MOQ, break-even units · verdict on **written** quotes only · the margin sheet as XLSX with live formulas (tested: LibreOffice recalculates it to the code's numbers). |
+| `audit.py` | Audit jobs from the bot: `/audit new`, `email`, `fee` (Razorpay advance link), `paid`, `name`, `hours`, `build`, `deliver` (email with the sheet attached + balance link), `lost`. **Build refuses below 3 quotes / 2 written.** Report: verdict, our demand evidence (or "not evidenced"), every quote landed, price ±10%, compliance, what it does not cover. Month view: sold, ₹ collected, hours, ₹ per hour, against 3 a month. |
+| `savings.py` | `/deal <EarnKaro link> <line>` and `/card <link> <card> \| <line>` queue offers; the drip posts one at 13:00 / 19:00 (max 2 a day; cards max 2 a week, never two days running, evening only). #Ad disclosure first; cards carry "the bank decides … not financial advice"; approval promises and "best card" refused; only links on `SAVINGS_DOMAINS`. Arms compared **per post** against Amazon; an arm is paused 7 days automatically if members fall 3 nights after it. |
+| Operator / bot | Live Floor shows audits (sold, ₹, h, ₹/h) and savings (queue, per-post verdicts, pauses). New bot replies `/audits` (open jobs, our IndiaMART suppliers, RFQ text) and `/queue`. An audit buyer counts as a payer in the seller test. Outreach now offers the audit after the free page (`VENDOR_OFFER=audit` · `radar` · `both`). |
+
+### Run an audit (owner)
+1. `/audit new FitCo | B0CKBND48X | 1249` (an ASIN or product words; add `| category` for ₹20,000) → `/audit email A1 ops@fitco.in` → `/audit fee A1` (₹5,000 advance link; Razorpay emails it).
+2. When paid: `/audits` shows the suppliers our IndiaMART run found and the RFQ text. Send it to 4–6 suppliers (IndiaMART enquiry, WhatsApp, email). `/audit name A1 doorway pull up bar` if the generic name needs fixing.
+3. Each answer: `/quote A1 Shree Traders price=520 moq=100 gst=18 freight=2500 kg=2.6 dims=100x12x8 lead=7 written=yes`.
+4. `/audit build A1` → report + sheet come to you. Read them. `/audit deliver A1` → to the client with the balance link. Log time with `/audit hours A1 2`.
+
+### Settings
+Variables: `AUDIT_DELIVER_TO` (city for freight), `AUDIT_FEE_SKU` (10000), `AUDIT_FEE_CATEGORY` (20000), `AUDIT_ADVANCE_PCT`
+(0.5), `VENDOR_OFFER` (audit), `SAVINGS_SLOTS` (13,19; empty = off), `SAVINGS_PER_DAY` (2), `CARDS_PER_WEEK` (2),
+`SAVINGS_DOMAINS` (ekaro.in,earnkaro.com). New tabs the machine keeps: `AUDITS`, `QUOTES`, `SAVINGS_QUEUE`, `SAVINGS_STATE`.
+EarnKaro earnings: `/money ek-deals <orders> <₹> [clicks]` and `/money ek-cards …` once a week (no API).
+
+### Verified / not verified (22 Nov 2026)
+Verified: the weight-handling table and volumetric rule (Zoutons, from Amazon's fee schedule), EarnKaro's card payouts
+(₹350–₹2,975, paid on activation, confirmed within 75 days), ASCI's rule that unqualified creators may share generic
+financial information but not technical advice, disclosure upfront, Keepa's Amazon.in rank history. Not verified:
+your STEP level (Premium/Advanced pay less, Basic more), EarnKaro's link domain for every merchant (hence the setting),
+whether a given bank's programme allows Telegram promotion (check each campaign's terms in EarnKaro).
+
+## v1.70: three users, one Operator — run the business from the bot, no spreadsheet (22 Nov)
+
+**Who it serves (corrected).** Shoppers on Telegram / WhatsApp / X are the *audience* (Amazon pays ~₹15 an order:
+about ₹6 per 1,000 views). Amazon sellers who already sell are the *payers* (₹999 pilot, then ₹1,999 a month; 25 of
+them = ₹50,000). Drop shipping is a *capped proof lane*: at most 3 pilots, judged by fixed kill rules, whose real
+numbers become the strongest pitch to sellers. Release notes and the end-to-end workflow: the "OneZero Machine v1.70 —
+Release Notes" doc.
+
+### What is new
+| File | What it does |
+|---|---|
+| `fees.py` | Amazon.in fee model as of 22 Nov 2026: 0% referral under ₹1,000 (since 16 Mar 2026), the **highest** published closing fee per band (after the 7 Sep rise), a rough Easy Ship estimate (published examples: 350 g → ₹55, 3.5 kg → ₹180), the 10% + GST seller-cancellation fee (since 17 Aug), weight read from titles (load ratings skipped). Every number says whether it is *published* or *ASSUMED*; override with `AMZ_FEES`. GST on fees is not a cost (input tax credit). |
+| `vendor.py` | Weekly category Radar (what lasted, started slipping, new and holding, openings with "a supplier price under ₹X keeps 25%") as email HTML, WhatsApp text and a Telegram preview · small-brand leads (slipping and holding) with a message drafted from their own numbers · `VENDOR_CRM` · Razorpay Payment Links (₹999 after a call, ₹1,999 renewal 5 days before the end) · SMTP delivery · the seller-test verdict (hook-problem tier at 15 contacts / < 4 calls; dropping needs 30 and 8). |
+| `dropship.py` | Shortlist: durable · sourceable · no licence flag · ₹299–999 · ≤ 2 kg · stock-out risk priced in. Readiness checklist (seller of record, GST place of business for the pickup address, Legal Metrology labels, sample, fee preview). Pilots from bot commands, kill rules fixed in code: > 2.5% supplier cancellations, < 10% margin, < 5 orders in 14 days → stop; 20+ orders, ≥ 25% margin → keep. |
+| `operator_agent.py` | The Operator: applies the owner's bot commands and uploaded reports (idempotent), compares durable vs momentum **per post** (the Bot API gives no view counts), works out the ₹50,000 goal from measured money, and writes ONE nightly **Live Floor** report with today's to-dos. |
+| `cloudflare_worker/worker.js` | **Owner desk** in the bot (your chat id only): `/floor`, `/leads`, `/lead L1a2b call`, `/pilot add B0… 210`, `/order P1 2 499`, `/cancel`, `/return`, `/money earnkaro 3 140`, send the Associates report as a CSV file, `/refresh` (runs the Operator now). Queued in KV; `/events` and `/push` for the Operator. Strangers get the shopper bot as before. |
+| `.github/workflows/operator.yml` | Nightly 22:00 IST (+ on demand). Replaces `growth.yml`'s schedule (it runs the same counts first). |
+| `.github/workflows/vendor.yml` | Mondays 08:30 IST: Radar to paying sellers, new leads, drop-ship shortlist. |
+
+Also: the growth goal maths now assumes ₹15 an order (was ₹40); the bot's `/pro` says nothing is sold inside Telegram
+(Telegram requires Stars for digital services sold in a bot — the Radar is sold by payment link and delivered by email).
+
+### The owner's whole job
+1. Morning: open the Live Floor in Telegram (or `/floor`). Do the numbered to-dos.
+2. Send the outreach messages `/leads` gives you (copy, paste, send — a person sends, never the bot). Tell the bot
+   what happened: `/lead L1a2b contacted`, `replied`, `call`, `no`, `stop`, `email name@shop.in`.
+3. After a call: the Operator makes the ₹999 link that night (Razorpay emails it when you saved an email). Paid → the
+   seller gets the Radar every Monday; renewal link 5 days before the end.
+4. Once a week: download the tracking-ID report in Associates Central and send it to the bot as a file.
+5. Drop shipping: `/pilot ready` (checklist) → `/pilot add <ASIN> <cost>` → log each sale with `/order`.
+
+### Switch it on
+- Worker: add `OWNER_CHAT_ID` (your Telegram user id) to `wrangler.toml`, make sure the `RADAR_KV` namespace is bound,
+  `npx wrangler deploy`. The Worker's GH_TOKEN already has "Actions: write" (needed for `/refresh`).
+- Repo **variables**: `WORKER_URL` (https://&lt;worker&gt;.workers.dev), `VENDOR_SENDER` ("Ayaz, OneZero"),
+  `VENDOR_REPLY_TO`, and add `telegram.durable=<ID>` to `AFF_TAGS` so the two arms can be compared.
+- Repo **secrets** (optional, each switches one thing on): `RAZORPAY_KEY_ID` + `RAZORPAY_KEY_SECRET` (payment links),
+  `SMTP_HOST` `SMTP_PORT` `SMTP_USER` `SMTP_PASS` `SMTP_FROM` (Radar by email; without them it comes to you to forward).
+- New tabs the machine keeps for itself (you never edit them): `VENDOR_CRM`, `PILOTS`, `PILOT_ORDERS`, `MONEY`,
+  `OPERATOR_DONE`, `FLOOR_LOG`, `DS_SHORTLIST`. The old manual `SELLER_LEADS` tab is no longer read.
+
+### What I verified, and what I could not
+- Verified (22 Nov 2026): referral 0% under ₹1,000 (Amazon fee guide), closing-fee groups and the 7 Sep rise
+  (Zoutons, from Amazon's fees page), the 17 Aug cancellation fee, Amazon's drop-shipping policy, Telegram's Stars rule,
+  Razorpay's Payment Links API shape, the Creators API's 10-sales rule.
+- Not verified: closing fees for ₹501–1,000 and referral rates above ₹1,000 (both ASSUMED and labelled), GST rates
+  per product (ASSUMED 18%; set `AMZ_FEES={"gst": …}`), and the exact column names of the Associates India CSV export
+  (matched loosely; send one real file and the parser can be pinned).
+- Tests: `test_v170.py` (fees, vendor, drop-ship, Operator, end-to-end operator + vendor runs with the bot queue,
+  Razorpay and SMTP faked) and the Worker suite. A run on the real 17-day history produced the leads, Radar and
+  shortlist shown in the release notes.
+
 ## v1.60: the growth machine — measured channels, a share loop, an X agent and a shopper bot
 The strategy is in the doc **"OneZero Growth Machine — Strategic Plan"**. This release builds the parts the plan needs. The plan's core finding: at assumed rates, ₹50,000 a month from affiliate links alone needs about 52,000 engaged members. Members are the bottleneck, so the machine measures where they come from before it tries to scale anything.
 

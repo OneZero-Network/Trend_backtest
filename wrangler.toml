@@ -11,12 +11,15 @@ AFF_TAG_BOT      = ""      # tracking ID for links the bot sends, e.g. ozbot-21 
 CHANNEL_JOIN_URL = ""      # the 'bot' invite link from the GROWTH_LINKS tab (created by the growth job)
 INDEX_PATH       = "bot/radar_index.json"
 INDEX_REF        = "data-archive"
+# v1.70 owner desk: your own Telegram user id (message @userinfobot to see it). Falls back to TG_CHAT_ID.
+OWNER_CHAT_ID    = ""
 
 [triggers]
 # UTC. Must match JOBS in worker.js exactly.
 crons = ["15 2 * * *", "30 3-15/2 * * *"]
 
-# v1.60: counts channel joins per invite link and bot use. Create it once:
+# v1.60: counts channel joins per invite link and bot use. v1.70: REQUIRED for the owner desk (command queue,
+# uploaded reports, /floor, /leads). Create it once:
 #   npx wrangler kv namespace create RADAR_KV   → paste the id below and uncomment.
 # [[kv_namespaces]]
 # binding = "RADAR_KV"

@@ -9,7 +9,7 @@ Daily (BR_MODE=growth, ~22:00 IST):
                If the shopper bot's webhook is set (worker.js), the Worker counts them and serves /stats instead,
                because getUpdates stops working while a webhook is set.
   x            posts and spend from X_POST_LOG
-  associates   the Associates report you paste into ASSOC_REPORT, split by tracking ID → channel
+  associates   the Associates report (sent to the bot as a CSV from v1.70, or pasted into ASSOC_REPORT)
 
 Weekly (Mondays, or BR_GROWTH_REPORT=1): the kill lines from the plan, each with its value and status, plus the goal
 worked backwards with MEASURED rates where they exist (assumptions are labelled as such until then).
@@ -26,7 +26,7 @@ import pandas as pd
 
 LINK_NAMES = ("tg-forward", "wa-channel", "x-bio", "bot", "site", "swap-1", "swap-2")
 GOAL_INR = 50000
-ASSUMED = {"inr_per_order": 40.0, "conversion": 0.04, "daily_click_rate": 0.02}
+ASSUMED = {"inr_per_order": 15.0, "conversion": 0.04, "daily_click_rate": 0.02}   # v1.70: ₹15 = median fee on our picks (was ₹40)
 
 # The plan's kill lines, decided before any data (OneZero Growth Machine — Strategic Plan). Edit here, not later.
 KILL_LINES = [
@@ -258,7 +258,7 @@ def review(ledger, today, assoc, inputs, goal=GOAL_INR):
     else:
         per_member_month = ASSUMED["daily_click_rate"] * 30 * ASSUMED["conversion"] * ASSUMED["inr_per_order"]
         need = goal / per_member_month
-        basis = (f"ASSUMED (no Associates report yet): 2% of members click a day, 4% of clicks buy, ₹40 an order "
+        basis = (f"ASSUMED (no Associates report yet): 2% of members click a day, 4% of clicks buy, ₹15 an order "
                  f"→ ₹{per_member_month:.2f} per member per month")
     g = vals.get("member_growth_week_pct")
     eta = ""

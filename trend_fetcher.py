@@ -39,6 +39,8 @@ import calculator, compliance, youtube_check, sourcing, picks, brief, discovery,
 import capture, resell_gate, durable
 import tags as aff_tags, xpost, radar_index
 import content as content_agent, growth as growth_agent
+import fees, vendor, dropship, operator_agent   # v1.70: three users + the Operator agent
+import audit, quotes, savings                    # v1.80: sourcing & margin audits, savings & cards funnel
 from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree as ET
 
@@ -60,7 +62,7 @@ except ImportError:
     cffi_requests = None
     HAS_CURL_CFFI = False
 
-VERSION = "1.60"        # the ONE place the version lives (digest header, log banner, Tool Watch digest)
+VERSION = "1.80"        # the ONE place the version lives (digest header, log banner, Tool Watch digest)
 IST = timezone(timedelta(hours=5, minutes=30))
 NOW_IST = datetime.now(IST)
 TODAY = NOW_IST.strftime("%Y-%m-%d")
@@ -132,7 +134,7 @@ YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 BR_YT_TOP_N     = int(os.environ.get("BR_YT_TOP_N", "15"))       # ≈101 quota units each; free quota 10,000/day
 # State trends run in their own weekly workflow (BR_MODE=states), not in the daily run:
 # ~20 rate-limited Google calls would slow the daily run and risk blocking rising-queries.
-BR_MODE         = os.environ.get("BR_MODE") or "daily"          # daily | states | sourcing | affiliate | brief | estimate | drip | discover | automation | toolwatch | growth
+BR_MODE         = os.environ.get("BR_MODE") or "daily"          # daily | states | sourcing | affiliate | brief | estimate | drip | discover | automation | toolwatch | growth | operator | vendor
 BR_SOURCING_TOP_N   = int(os.environ.get("BR_SOURCING_TOP_N") or "20")     # products searched per run
 AFFILIATE_TAG     = os.environ.get("AFFILIATE_TAG") or ""         # your Amazon Associates tag, e.g. name-21
 AFFILIATE_GROUPS = os.environ.get("AFFILIATE_GROUPS") or ""
@@ -148,7 +150,10 @@ BR_ROUNDUP_HOUR    = int(os.environ.get("BR_ROUNDUP_HOUR") or 11)        # Sunda
 BR_POLL_HOUR       = int(os.environ.get("BR_POLL_HOUR") or 19)           # Wednesday poll (0 = off)
 BR_GOAL_INR        = float(os.environ.get("BR_GOAL_INR") or 50000)
 WORKER_STATS_URL   = (os.environ.get("WORKER_STATS_URL") or "").strip()  # https://<worker>.workers.dev/stats
-WORKER_KEY         = (os.environ.get("WORKER_KEY") or "").strip()                           # v1.51: of BR_CALC_TOP_N calculator slots, durable first
+WORKER_KEY         = (os.environ.get("WORKER_KEY") or "").strip()
+WORKER_URL         = ((os.environ.get("WORKER_URL") or "").strip() or re.sub(r"/stats/?$", "", WORKER_STATS_URL)).rstrip("/")   # v1.70
+VENDOR_LEADS_PER_WEEK = int(os.environ.get("VENDOR_LEADS_PER_WEEK") or 5)
+VENDOR_REPLY_TO    = (os.environ.get("VENDOR_REPLY_TO") or os.environ.get("SMTP_FROM") or "").strip()                           # v1.51: of BR_CALC_TOP_N calculator slots, durable first
 BR_STOCK_PREVIEW   = (os.environ.get("BR_STOCK_PREVIEW") or "1") != "0"   # admin-only early stock-gate look
 BR_POOL_PER_GROUP  = int(os.environ.get("BR_POOL_PER_GROUP") or 6)
 DRIP_SLOTS_IST     = [int(h) for h in (os.environ.get("BR_DRIP_HOURS") or "9,11,13,15,17,19,21").split(",") if h.strip()]
@@ -2197,13 +2202,8 @@ def x_agent(astore, hist, batch, last, TAGS):
     return []
 
 
-def main_growth():
-    """Daily growth snapshot (members, invite links, joins per link, bot use, X spend) → GROWTH ledger;
-    Mondays (or BR_GROWTH_REPORT=1): the kill-line review + the goal worked backwards → admin chat + GROWTH_REPORT."""
-    log(f"📈 BAZAAR RADAR v{VERSION} — growth · {NOW_IST.strftime('%Y-%m-%d %H:%M')} IST")
-    store = Store()
-    astore = affiliate_store(store)
-    TAGS = aff_tags.Tags(AFFILIATE_TAG)
+def growth_snapshot(astore, TAGS):
+    """Members, invite links, joins per link, bot use, X spend → GROWTH ledger. → (ledger, values written, notes)."""
     ledger = astore.read("GROWTH")
     rows, add, notes = [], {}, []
     chat, tok = AFFILIATE_CHAT_ID.strip(), (AFFILIATE_BOT_TOKEN or TELEGRAM_BOT_TOKEN)
@@ -2257,24 +2257,402 @@ def main_growth():
         rows.append((d, m, k, n + (float(prev.get(d)) if d in prev.index else 0)))
     ledger = growth_agent.add_rows(ledger, rows)
     astore.write("GROWTH", ledger)
+    return ledger, len(rows) + len(add), notes
+
+
+def growth_review(astore, ledger, TAGS):
+    """Monday kill-line review lines (growth.py), with the measured goal maths."""
+    assoc = growth_agent.parse_assoc(astore.read("ASSOC_REPORT"), TAGS)
+    if not assoc:                                          # v1.70: the latest report sent to the bot counts too
+        frm, to, rng = operator_agent.latest_assoc(astore.read("MONEY"))
+        if frm:
+            assoc = {ch: {k: float(pd.to_numeric(g[k], errors="coerce").fillna(0).sum()) for k in ("clicks", "ordered", "shipped", "earnings")}
+                     for ch, g in rng.groupby("channel")}
+    gi = astore.read("GROWTH_INPUT")
+    inputs = dict(zip(gi["key"].astype(str), gi["value"].astype(str))) if not gi.empty and "key" in gi else {}
+    crm = astore.read("VENDOR_CRM")
+    if not crm.empty and "paying_sellers" not in inputs:
+        inputs["paying_sellers"] = str(len(vendor.subscribers(crm, TODAY)))
+    rep_rows, lines = growth_agent.review(ledger, TODAY, assoc, inputs, goal=BR_GOAL_INR)
+    old = astore.read("GROWTH_REPORT")
+    new = pd.DataFrame(rep_rows).astype(str)
+    astore.write("GROWTH_REPORT", pd.concat([old, new], ignore_index=True) if not old.empty else new)
+    used, own = TAGS.summary()
+    lines += ["", "Tracking IDs: " + (", ".join(f"{ch} = {used[ch]}" for ch in own) if own else
+              "only the default store ID — create one per channel in Associates Central and set AFF_TAGS.")]
+    if not assoc:
+        lines.append("No Associates report yet — send last week's tracking-ID report to the bot as a CSV file.")
+    return lines
+
+
+def main_growth():
+    """Daily growth snapshot (members, invite links, joins per link, bot use, X spend) → GROWTH ledger;
+    Mondays (or BR_GROWTH_REPORT=1): the kill-line review + the goal worked backwards → admin chat + GROWTH_REPORT."""
+    log(f"📈 BAZAAR RADAR v{VERSION} — growth · {NOW_IST.strftime('%Y-%m-%d %H:%M')} IST")
+    store = Store()
+    astore = affiliate_store(store)
+    TAGS = aff_tags.Tags(AFFILIATE_TAG)
+    ledger, n, notes = growth_snapshot(astore, TAGS)
     if NOW_IST.weekday() == 0 or os.environ.get("BR_GROWTH_REPORT") == "1":
-        assoc = growth_agent.parse_assoc(astore.read("ASSOC_REPORT"), TAGS)
-        gi = astore.read("GROWTH_INPUT")
-        inputs = dict(zip(gi["key"].astype(str), gi["value"].astype(str))) if not gi.empty and "key" in gi else {}
-        rep_rows, lines = growth_agent.review(ledger, TODAY, assoc, inputs, goal=BR_GOAL_INR)
-        old = astore.read("GROWTH_REPORT")
-        new = pd.DataFrame(rep_rows).astype(str)
-        astore.write("GROWTH_REPORT", pd.concat([old, new], ignore_index=True) if not old.empty else new)
-        used, own = TAGS.summary()
-        lines += ["", "Tracking IDs: " + (", ".join(f"{ch} = {used[ch]}" for ch in own) if own else
-                  "only the default store ID — create one per channel in Associates Central and set AFF_TAGS.")]
-        if not assoc:
-            lines.append("No Associates report yet — paste last week's tracking-ID report into the ASSOC_REPORT tab.")
+        lines = growth_review(astore, ledger, TAGS)
         send_telegram(f"📈 <b>Growth review — week to {TODAY}</b>\n" + "\n".join(_esc(l) for l in lines)
-                      + ("\n\n" + "\n".join(_esc(n) for n in notes) if notes else ""))
+                      + ("\n\n" + "\n".join(_esc(n_) for n_ in notes) if notes else ""))
     elif notes:
-        send_telegram("📈 <b>Growth snapshot</b>\n" + "\n".join(_esc(n) for n in notes))
-    log(f"Growth: {len(rows) + len(add)} ledger values written")
+        send_telegram("📈 <b>Growth snapshot</b>\n" + "\n".join(_esc(n_) for n_ in notes))
+    log(f"Growth: {n} ledger values written")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# v1.70 OPERATOR AGENT + VENDOR LANE + DROP-SHIP LANE
+# ══════════════════════════════════════════════════════════════════════
+def worker_get(path):
+    """GET <WORKER_URL><path>?key=… → JSON, or None when the Worker is not configured or fails."""
+    if not (WORKER_URL and WORKER_KEY):
+        return None
+    try:
+        r = requests.get(f"{WORKER_URL}{path}", params={"key": WORKER_KEY}, timeout=30)
+        return r.json() if r.status_code == 200 else None
+    except Exception as exc:
+        log(f"Worker {path}: {exc}", "WARN")
+        return None
+
+
+def worker_push(**texts):
+    if not (WORKER_URL and WORKER_KEY):
+        return False
+    try:
+        r = requests.post(f"{WORKER_URL}/push", params={"key": WORKER_KEY}, json=texts, timeout=30)
+        return r.status_code == 200
+    except Exception as exc:
+        log(f"Worker push: {exc}", "WARN")
+        return False
+
+
+def _fit(text, limit=3900):
+    """Keep a Telegram HTML message under one message: drop whole lines from the end, never cut a tag."""
+    lines = str(text).split("\n")
+    while len("\n".join(lines)) > limit and len(lines) > 1:
+        lines.pop()
+    return "\n".join(lines)
+
+
+def ind_costs_from(store):
+    """Latest IndiaMART indicative cost per ASIN (triage only, never a quote) from SOURCING_HISTORY."""
+    sh = store.read("SOURCING_HISTORY")
+    if sh.empty or "ind_cost" not in sh:
+        return {}
+    sh = sh[pd.to_numeric(sh["ind_cost"], errors="coerce").notna()].sort_values("date")
+    return {a: float(c) for a, c in zip(sh["asin"], pd.to_numeric(sh["ind_cost"]))}
+
+
+def _briefs_for(signals, hist, cats, fader=""):
+    ic = {}
+    return {c: vendor.category_brief(signals, hist, c, TODAY, cat_names=CATEGORIES, ind_costs=ic, fader=fader) for c in cats}
+
+
+def _savings_from_events(events, queue):
+    """/deal and /card commands → SAVINGS_QUEUE. → (queue, [(key, reply)])."""
+    out = []
+    for ev in events:
+        cmd, args = operator_agent.parse_command(ev.get("text", ""))
+        if cmd not in ("deal", "card"):
+            continue
+        item, why = savings.parse(cmd, args)
+        if item:
+            queue, why = savings.enqueue(queue, item, TODAY)
+        out.append((ev["k"], f"{ev.get('text', '')[:50]} → {why}"))
+    return queue, out
+
+
+def _savings_state(astore):
+    st = astore.read("SAVINGS_STATE")
+    return dict(zip(st["key"].astype(str), st["value"].astype(str))) if not st.empty and "key" in st else {}
+
+
+def savings_slot(astore, targets, glinks, plog_new):
+    """Inside the drip run: take /deal and /card from the bot queue, then post one due offer. → post-log rows."""
+    queue = savings.frame(astore.read("SAVINGS_QUEUE"))
+    done_df = astore.read("OPERATOR_DONE")
+    done = set(done_df["key"].astype(str)) if not done_df.empty and "key" in done_df else set()
+    feed = worker_get("/events")
+    events, _ = operator_agent.new_items(feed, done)
+    queue, handled = _savings_from_events(events, queue)
+    if handled:
+        nd = pd.DataFrame({"key": [k for k, _ in handled], "at": NOW_IST.strftime("%Y-%m-%d %H:%M")})
+        astore.write("OPERATOR_DONE", pd.concat([done_df, nd], ignore_index=True) if not done_df.empty else nd)
+    plog = astore.read("AFF_POST_LOG")
+    if plog_new:
+        plog = pd.concat([plog, pd.DataFrame(plog_new).astype(str)], ignore_index=True) if not plog.empty else pd.DataFrame(plog_new).astype(str)
+    item = savings.due(queue, plog, NOW_IST.replace(tzinfo=None), _savings_state(astore))
+    rows = []
+    if item:
+        msg = savings.message(item, content_agent.telegram_footer(glinks))
+        global TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN
+        own, own_tok = TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN
+        try:
+            for name, chat, _ in targets:
+                TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN = chat, AFFILIATE_BOT_TOKEN or own_tok
+                send_telegram(msg)
+                rows.append({"posted_at": NOW_IST.strftime("%Y-%m-%d %H:%M"), "group": name, "chat": chat, "asin": item["id"],
+                             "title": (item["card"] or item["text"])[:100], "link": item["url"], "arm": item["kind"],
+                             "channel": "telegram", "tag": "earnkaro"})
+        finally:
+            TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN = own, own_tok
+        queue = savings.mark_posted(queue, item["id"], NOW_IST.strftime("%Y-%m-%d %H:%M"))
+    if handled or item:
+        astore.write("SAVINGS_QUEUE", queue)
+    return rows
+
+
+def main_operator():
+    """Nightly (and /refresh): owner commands → growth counts → payments → pilots → one Live Floor report."""
+    log(f"🟢 BAZAAR RADAR v{VERSION} — operator · {NOW_IST.strftime('%Y-%m-%d %H:%M')} IST")
+    store = Store()
+    astore = affiliate_store(store)
+    TAGS = aff_tags.Tags(AFFILIATE_TAG)
+    try:
+        ledger, _n, notes = growth_snapshot(astore, TAGS)
+    except Exception as exc:
+        log_tb("growth snapshot", exc)
+        ledger, notes = astore.read("GROWTH"), [f"⚠️ growth counts failed: {exc}"]
+    signals = store.read("TREND_SIGNALS")
+    crm = vendor.crm_frame(astore.read("VENDOR_CRM"))
+    pilots, orders = astore.read("PILOTS"), astore.read("PILOT_ORDERS")
+    money = operator_agent.money_frame(astore.read("MONEY"))
+    audits = audit.frame(astore.read("AUDITS"))
+    qdf = audit.frame(astore.read("QUOTES"), quotes.QUOTE_COLS)
+    squeue = savings.frame(astore.read("SAVINGS_QUEUE"))
+    rzp = vendor.Razorpay()
+    sender = vendor._sender()
+    audit_acts = []
+    done_df = astore.read("OPERATOR_DONE")
+    done = set(done_df["key"].astype(str)) if not done_df.empty and "key" in done_df else set()
+    processed, new_done = [], []
+    feed = worker_get("/events")
+    if feed is None and WORKER_URL:
+        notes.append("⚠️ Could not read the bot's command queue (check WORKER_URL / WORKER_KEY)")
+    events, uploads = operator_agent.new_items(feed, done)
+    for ev in events:
+        cmd, args = operator_agent.parse_command(ev.get("text", ""))
+        reply = "ignored"
+        try:
+            if cmd == "lead":
+                crm, reply = vendor.apply_command(crm, args, TODAY)
+            elif cmd in ("pilot", "order", "cancel", "return"):
+                pilots, orders, reply = dropship.command(pilots, orders, [cmd] + args, TODAY, signals)
+            elif cmd == "money":
+                rows, reply = operator_agent.money_command(args, TODAY)
+                money = operator_agent.add_money(money, rows)
+            elif cmd in ("audit", "quote"):
+                audits, qdf, reply, acts = audit.command(audits, qdf, [cmd] + args, TODAY, rzp=rzp, sender=sender)
+                audit_acts += acts
+            elif cmd in ("deal", "card"):
+                squeue, got = _savings_from_events([ev], squeue)
+                reply = got[0][1].split(" → ", 1)[-1] if got else "ignored"
+        except Exception as exc:
+            reply = f"failed: {exc}"
+        processed.append(f"{ev.get('text', '')[:60]} → {str(reply).splitlines()[0][:100]}")
+        new_done.append(ev["k"])
+    for up in uploads:
+        rows = operator_agent.parse_upload(up.get("text", ""), up.get("caption", ""), up["k"][3:13] or TODAY,
+                                           TAGS, growth_agent.parse_assoc)
+        if rows:
+            money = operator_agent.add_money(money, rows)
+            processed.append(f"report {rows[0]['from']} to {rows[0]['to']}: {len(rows)} tracking IDs, "
+                             f"₹{sum(float(r['earnings']) for r in rows):,.0f}")
+        else:
+            notes.append(f"⚠️ Could not read {up.get('name', 'the file')}: send the tracking-ID summary report as CSV")
+        new_done.append(up["k"])
+    crm, pay_lines = vendor.payment_actions(crm, TODAY, rzp)
+    audits = audit.enrich(audits, signals)
+    audits, alines = audit.payments(audits, TODAY, rzp)
+    # build / deliver requested audits (files to you first; to the client only on /audit deliver)
+    for kind, jid in audit_acts:
+        i = audits.index[audits["job_id"] == jid][0]
+        job = audits.loc[i].to_dict()
+        try:
+            if kind == "build":
+                html_p, xlsx_p, v = audit.build(job, qdf, signals, LOCAL_OUT_DIR, cat_names=CATEGORIES)
+                if html_p is None:
+                    alines.append(f"🧾 {jid}: not built — {v}")
+                    continue
+                audits.loc[i, ["status", "status_at", "built", "verdict"]] = ["report_ready", TODAY, TODAY, v[0]]
+                send_telegram_document(html_p, f"🧾 {jid} {job['client']}: report ({v[0]}). Read it, then /audit deliver {jid}.")
+                send_telegram_document(xlsx_p, f"🧾 {jid}: margin sheet with live formulas.")
+                alines.append(f"🧾 {jid} built: {v[0]} — {v[1]}")
+            elif kind == "deliver":
+                html_p, xlsx_p, v = audit.build(job, qdf, signals, LOCAL_OUT_DIR, cat_names=CATEGORIES)
+                if html_p is None:
+                    alines.append(f"🧾 {jid}: not delivered — {v}")
+                    continue
+                audits, bline = audit.balance_link(audits, i, TODAY, rzp, sender)
+                subject = f"Sourcing & margin audit — {job['product']}"
+                if vendor.smtp_ready() and job["email"]:
+                    body = open(html_p, encoding="utf-8").read()
+                    note = (f"<p style='font:15px Arial,sans-serif'>The balance can be paid here: "
+                            f"<a href='{audits.at[i, 'bal_url']}'>{audits.at[i, 'bal_url']}</a></p>" if audits.at[i, "bal_url"] else "")
+                    vendor.send_email(job["email"], subject, body.replace("</body>", note + "</body>"), attachments=[xlsx_p])
+                    alines.append(f"📤 {jid} sent to {job['email']}" + (f"; {bline}" if bline else ""))
+                else:
+                    send_telegram_document(html_p, f"📤 {jid}: forward to {job['client']} ({'no client email' if not job['email'] else 'SMTP not set'}).")
+                    send_telegram_document(xlsx_p, f"📤 {jid}: the margin sheet for {job['client']}.")
+                    alines.append(f"📤 {jid}: files sent to you to forward" + (f"; {bline}" if bline else ""))
+                audits.loc[i, ["status", "status_at", "delivered"]] = ["delivered", TODAY, TODAY]
+        except Exception as exc:
+            log_tb(f"audit {kind} {jid}", exc)
+            alines.append(f"⚠️ {jid}: {kind} failed ({exc})")
+    am = audit.month(audits, TODAY)
+    audit_paid = int(pd.to_numeric(audits["paid_inr"], errors="coerce").fillna(0).gt(0).sum()) if len(audits) else 0   # an audit buyer is a payer
+    tier = vendor.tier(crm, extra_paid=audit_paid)
+    mrr_inr, pilots_paid, nsubs = vendor.mrr(crm, TODAY)
+    pil = dropship.pilot_status(pilots, orders, signals, TODAY)
+    plog = astore.read("AFF_POST_LOG")
+    arms = operator_agent.arm_compare(money, plog, TAGS.map)
+    total, gline = operator_agent.goal_line(money, mrr_inr, pilots_paid, BR_GOAL_INR)
+    aud = operator_agent.audience(ledger, growth_agent.series)
+    posts_today = {}
+    if not plog.empty and "posted_at" in plog:
+        t = plog[plog["posted_at"].astype(str).str[:10] == TODAY]
+        t = t[~t.get("group", pd.Series("", index=t.index)).astype(str).isin(["whatsapp-assist"])]
+        if len(t):
+            posts_today = t.get("arm", pd.Series("", index=t.index)).astype(str).replace({"": "other", "nan": "other"}).value_counts().to_dict()
+    bu = growth_agent.series(ledger, "bot", "users")
+    xp = growth_agent.series(ledger, "x_posts", "posted")
+    xs = growth_agent.series(ledger, "x_spend_usd", "")
+    mtd = lambda s_: float(s_[s_.index.astype(str).str[:7] == TODAY[:7]].sum()) if len(s_) else 0.0
+    _, _, rng = operator_agent.latest_assoc(money)
+    rep_age = (NOW_IST.date() - datetime.strptime(rng["added"].max(), "%Y-%m-%d").date()).days if len(rng) else None
+    sl = astore.read("DS_SHORTLIST")
+    sstate = _savings_state(astore)
+    sstate, pnotes = savings.pause_check(aud, plog, TODAY, sstate)
+    if pnotes:
+        astore.write("SAVINGS_STATE", pd.DataFrame({"key": list(sstate), "value": list(sstate.values())}))
+    stable = savings.arms(money, plog)
+    paused_now = ", ".join(f"{a} paused to {sstate['pause_' + a]}" for a in ("savings", "cards") if savings.paused(sstate, a, TODAY))
+    open_a = am["open"]
+    ctx_steps = [f"{r['job_id']} {r['client']}: {audit.next_step(r, qdf)}" for _, r in open_a.iterrows()
+                 if audit.next_step(r, qdf) and r["status"] not in ("fee_sent", "delivered")]
+    ctx = {"today": TODAY, "audience": aud, "posts_today": posts_today,
+           "audit_month": am if (len(audits) or audit.TARGET_PER_MONTH) else None, "audit_lines": alines,
+           "audit_steps": ctx_steps, "savings_lines": savings.arms_verdict(stable) + pnotes,
+           "savings_queue": int((squeue["status"] == "queued").sum()), "savings_paused": paused_now,
+           "savings_on": bool(savings.SLOTS),
+           "bot_users": int(bu.get(TODAY)) if TODAY in bu.index else None,
+           "x_line": (f"X: {int(mtd(xp))} posts this month, ${mtd(xs):.2f}" if len(xp) else ""),
+           "goal_line": gline, "arms": arms, "tier": tier, "subs": nsubs, "pay_lines": pay_lines, "pilots": pil,
+           "shortlist_n": int((sl["date"] == sl["date"].max()).sum()) if not sl.empty and "date" in sl else 0,
+           "processed": processed, "notes": notes, "crm": crm, "report_age": rep_age}
+    text = _fit(operator_agent.floor(ctx, _esc))
+    leads_txt = _fit(operator_agent.leads_message(crm, _briefs_for(signals, None, set(crm.loc[crm["status"] == "new", "category"])),
+                                                  vendor.outreach, vendor.contact_links, _esc))
+    # write state BEFORE messaging, so a failed send never repeats a payment step
+    astore.write("VENDOR_CRM", crm) if len(crm) else None
+    if pilots is not None and len(pilots):
+        astore.write("PILOTS", dropship._frame(pilots, dropship.PILOT_COLS))
+    if orders is not None and len(orders):
+        astore.write("PILOT_ORDERS", dropship._frame(orders, dropship.ORDER_COLS))
+    if len(money):
+        astore.write("MONEY", money)
+    if len(audits):
+        astore.write("AUDITS", audits)
+    if len(qdf):
+        astore.write("QUOTES", qdf)
+    if len(squeue):
+        astore.write("SAVINGS_QUEUE", squeue)
+    if new_done:
+        nd = pd.DataFrame({"key": new_done, "at": NOW_IST.strftime("%Y-%m-%d %H:%M")})
+        astore.write("OPERATOR_DONE", pd.concat([done_df, nd], ignore_index=True) if not done_df.empty else nd)
+    fl = astore.read("FLOOR_LOG")
+    row = pd.DataFrame([{"date": TODAY, "members": aud.get("now") or "", "contacted": tier["contacted"], "calls": tier["calls"],
+                         "paid": tier["paid"], "mrr_inr": mrr_inr, "monthly_total_inr": round(total), "pilots": len(pil),
+                         "verdict_sellers": tier["verdict"], "verdict_arms": arms[0], "audits_sold_month": am["sold"],
+                         "audit_cash_month": am["cash"]}]).astype(str)
+    fl = pd.concat([fl[fl["date"] != TODAY] if not fl.empty else fl, row], ignore_index=True)
+    astore.write("FLOOR_LOG", fl)
+    send_telegram(text)
+    if NOW_IST.weekday() == 0 or os.environ.get("BR_GROWTH_REPORT") == "1":
+        try:
+            send_telegram(f"📈 <b>Kill lines — week to {TODAY}</b>\n" + "\n".join(_esc(l) for l in growth_review(astore, ledger, TAGS)))
+        except Exception as exc:
+            log_tb("growth review", exc)
+    ready = "📋 <b>Before the first drop-ship listing</b>\n" + "\n".join(f"☐ {_esc(x)}" for x in dropship.READINESS)
+    audits_txt = _fit(audit.audits_message(audits, qdf, signals, store.read("SOURCING"), _esc, sender))
+    q_wait = squeue[squeue["status"] == "queued"]
+    queue_txt = ("🛍 <b>Waiting to post</b> (" + ", ".join(f"{h}:00" for h in savings.SLOTS) + ")\n"
+                 + "\n".join(f"{r['id']} {r['kind']}: {_esc((r['card'] + ' — ' if r['card'] else '') + r['text'][:80])}"
+                              for _, r in q_wait.iterrows())) if len(q_wait) else "Nothing queued. /deal <link> <line> adds a savings offer."
+    pushed = worker_push(floor=text, leads=leads_txt, ready=ready, audits=audits_txt, queue=_fit(queue_txt))
+    log(f"Operator: {len(events)} commands, {len(uploads)} uploads, {len(pay_lines)} payment lines, "
+        f"{len(pil)} pilots; pushed to the bot: {pushed}")
+
+
+def main_vendor():
+    """Mondays: the category Radar to every paying seller, new leads with messages ready, the drop-ship shortlist."""
+    log(f"🏪 BAZAAR RADAR v{VERSION} — vendor run · {TODAY}")
+    store = Store()
+    astore = affiliate_store(store)
+    hist = store.read(SHEET_HISTORY)
+    signals = store.read("TREND_SIGNALS")
+    if signals.empty or "durable" not in signals:
+        send_telegram("🏪 Vendor run: no TREND_SIGNALS with durability yet (needs the daily run on v1.51+)."); return
+    last = str(hist["date"].max()) if not hist.empty else TODAY
+    try:
+        fader = durable.fader_line(durable.fader_rates(hist)) if not hist.empty else ""
+    except Exception as exc:
+        log_tb("fader rates", exc); fader = ""
+    ic = ind_costs_from(store)
+    crm = vendor.crm_frame(astore.read("VENDOR_CRM"))
+    cats = [c for c in signals["category_slug"].dropna().astype(str).unique() if c not in BR_CALC_EXCLUDE]
+    briefs = {c: vendor.category_brief(signals, hist, c, last, cat_names=CATEGORIES, ind_costs=ic, fader=fader) for c in cats}
+    os.makedirs(LOCAL_OUT_DIR, exist_ok=True)
+    sent, forwarded = 0, []
+    subs = vendor.subscribers(crm, TODAY)
+    for i, r in subs.iterrows():
+        b = briefs.get(r["category"])
+        if not b or not b["lasted"]:
+            continue
+        page = vendor.brief_html(b, reply_to=VENDOR_REPLY_TO)
+        subject = f"{b['cname']}: what lasted on Amazon.in — week to {b['date']}"
+        try:
+            if vendor.smtp_ready() and r["email"]:
+                vendor.send_email(r["email"], subject, page, vendor.brief_whatsapp(b))
+                sent += 1
+            else:
+                path = os.path.join(LOCAL_OUT_DIR, f"radar_{r['category']}_{b['date']}_{r['lead_id']}.html")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(page)
+                send_telegram_document(path, f"🏪 Forward to {r['brand']} ({'no email on file' if not r['email'] else 'SMTP not set'}).")
+                forwarded.append(r["brand"])
+            crm.at[i, "last_brief"] = TODAY
+        except Exception as exc:
+            log_tb(f"brief to {r['brand']}", exc)
+    leads = vendor.find_leads(signals, CATEGORIES, known=set(crm["lead_id"]), per_cat=2,
+                              cats=[c for c in cats])[:VENDOR_LEADS_PER_WEEK]
+    crm, n_new = vendor.crm_merge(crm, leads, TODAY)
+    for c in sorted({l["category"] for l in leads})[:3]:                         # a sample brief per lead category
+        b = briefs.get(c)
+        if b and b["lasted"]:
+            path = os.path.join(LOCAL_OUT_DIR, f"radar_sample_{c}_{b['date']}.html")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(vendor.brief_html(b, reply_to=VENDOR_REPLY_TO))
+            send_telegram_document(path, f"🏪 Sample Radar — {b['cname']}. Send it to a seller who said yes.")
+    ds = dropship.shortlist(signals, CATEGORIES, ic)
+    if ds:
+        dsdf = pd.DataFrame([{"date": TODAY, "asin": x["asin"], "title": x["title"], "category": x["category"],
+                              "price": x["price"], "kg": x["kg"], "line": x["line"], "verdict": x["econ"]["verdict"],
+                              "flag": x["flag"], "score": x["score"]} for x in ds]).astype(str)
+        old = astore.read("DS_SHORTLIST")
+        astore.write("DS_SHORTLIST", pd.concat([old, dsdf], ignore_index=True) if not old.empty else dsdf)
+    astore.write("VENDOR_CRM", crm)
+    leads_txt = _fit(operator_agent.leads_message(crm, briefs, vendor.outreach, vendor.contact_links, _esc))
+    worker_push(leads=leads_txt)
+    tier = vendor.tier(crm)
+    send_telegram(f"🏪 <b>Vendor run — {TODAY}</b>\n"
+                  f"Radar sent to {sent} paying seller(s) by email" + (f"; {len(forwarded)} to forward: {_esc(', '.join(forwarded))}" if forwarded else "")
+                  + f"\n{n_new} new lead(s) — /leads in the bot has their messages ready.\nSellers: {_esc(tier['verdict'])}")
+    send_telegram(leads_txt)
+    send_telegram(dropship.shortlist_text(ds))
+    log(f"Vendor run: {sent} emailed, {len(forwarded)} forwarded, {n_new} new leads, {len(ds)} drop-ship candidates")
 
 
 def main_drip():
@@ -2358,6 +2736,10 @@ def main_drip():
             logs += drip_extras(astore, hist, pd.concat(posted_batches), last, TAGS, glinks)
         except Exception as exc:
             log_tb("WhatsApp / X agents", exc)
+    try:                                                   # v1.80: one EarnKaro deal or card offer, at its own slots
+        logs += savings_slot(astore, targets, glinks, logs)
+    except Exception as exc:
+        log_tb("savings slot", exc)
     if not posted_total and not logs:
         log("Drip: today's pool is fully posted"); return
     astore.write("AFF_POOL", pool.drop(columns=[c for c in pool.columns if c.startswith("_")]))
@@ -3289,6 +3671,10 @@ def main():
         return main_drip()
     if BR_MODE == "growth":
         return main_growth()
+    if BR_MODE == "operator":
+        return main_operator()
+    if BR_MODE == "vendor":
+        return main_vendor()
     if BR_MODE == "estimate":
         return main_estimate()
     if BR_MODE == "sourcing":

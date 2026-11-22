@@ -1,5 +1,5 @@
 // node test_worker.mjs — v1.60 shopper bot + join counter, with Telegram, GitHub and KV mocked.
-import worker, { extractAsin, describe, topList, reply, statsJson, istDate, _resetIndex } from "./worker.js";
+import worker, { extractAsin, describe, topList, reply, statsJson, istDate, _resetIndex, isOwner, ownerDesk, eventsJson, pushJson } from "./worker.js";
 
 let fails = 0;
 const check = (name, ok, info = "") => { console.log((ok ? "PASS " : "FAIL ") + name + (ok ? "" : "  " + JSON.stringify(info).slice(0, 400))); if (!ok) fails++; };
@@ -90,6 +90,64 @@ const stx = await worker.fetch(new Request("https://w.dev/stats?key=nope"), env)
 check("/stats needs the key", stx.status === 403);
 const home = await worker.fetch(new Request("https://w.dev/"), env);
 check("the scheduler's home page still answers", home.status === 200);
+
+// ── v1.70 owner desk ──────────────────────────────────────────────────
+const envO = { ...env0, OWNER_CHAT_ID: "4242", RADAR_KV: kv() };
+const om = (text, extra = {}) => ({ message: { chat: { id: 4242, type: "private" }, from: { id: 4242 }, text, ...extra } });
+check("the owner is recognised by chat id; anyone else is not", isOwner(envO, om("x").message) && !isOwner(envO, { chat: { id: 5 } }));
+const q1 = await reply(om("/lead L1a2b call"), envO, fakeFetch);
+check("an owner command is queued in KV and acknowledged", q1.text.startsWith("✍️ Queued") && [...envO.RADAR_KV.m.keys()].some(k => k.startsWith("ev:")), q1);
+const stranger = await reply({ message: { chat: { id: 5, type: "private" }, from: { id: 5 }, text: "/lead L1a2b call" } }, envO, fakeFetch);
+check("a stranger's /lead is NOT queued (they get the shopper bot)", !stranger.text.includes("Queued") && [...envO.RADAR_KV.m.keys()].filter(k => k.startsWith("ev:")).length === 1, stranger);
+check("/floor before any run says when it comes", (await reply(om("/floor"), envO, fakeFetch)).text.includes("22:00"));
+await pushJson(envO, { floor: "🟢 <b>Live Floor</b> test", leads: "🎯 leads test", other: "ignored" });
+check("/push stores floor and leads; /floor and /leads return them", (await reply(om("/floor"), envO, fakeFetch)).text.includes("Live Floor") && (await reply(om("/leads"), envO, fakeFetch)).text.includes("leads test"));
+await pushJson(envO, { ready: "📋 checklist" });
+check("/pilot ready answers at once from the pushed checklist (not queued)", (await reply(om("/pilot ready"), envO, fakeFetch)).text.includes("checklist")
+  && [...envO.RADAR_KV.m.keys()].filter(k => k.startsWith("ev:")).length === 1);
+check("/owner shows the owner commands", (await reply(om("/owner"), envO, fakeFetch)).text.includes("/pilot add"));
+const upFetch = async (url, opts) => {
+  url = String(url);
+  if (url.includes("/getFile")) return { json: async () => ({ ok: true, result: { file_path: "documents/r.csv" } }) };
+  if (url.includes("/file/bot")) return { text: async () => "Tracking Id,Clicks,Items Ordered,Ad Fees\nonezeronetwor-21,40,2,31.5\n" };
+  return fakeFetch(url, opts);
+};
+const up = await reply(om(undefined, { document: { file_id: "F1", file_name: "fee-tracking.csv", file_size: 200 }, caption: "2026-11-16 to 2026-11-22" }), envO, upFetch);
+check("a CSV sent by the owner is stored for the Operator", up.text.startsWith("📥 Got fee-tracking.csv") && [...envO.RADAR_KV.m.keys()].some(k => k.startsWith("up:")), up);
+const bigUp = await reply(om(undefined, { document: { file_id: "F2", file_name: "big.csv", file_size: 5e6 } }), envO, upFetch);
+check("an upload over 2 MB is refused politely", bigUp.text.includes("over 2 MB"), bigUp);
+const pdf = await reply(om(undefined, { document: { file_id: "F3", file_name: "x.pdf", file_size: 10 } }), envO, upFetch);
+check("a non-CSV file is not saved", pdf.text.includes("not saved"), pdf);
+const ej = await eventsJson(envO);
+check("/events returns queued commands and uploads with their keys", ej.events.length === 1 && ej.events[0].text === "/lead L1a2b call" && ej.uploads.length === 1 && ej.uploads[0].caption.includes("2026-11-16") && ej.uploads[0].k.startsWith("up:"), ej);
+const evx = await worker.fetch(new Request("https://w.dev/events?key=nope"), envO);
+const pux = await worker.fetch(new Request("https://w.dev/push?key=nope", { method: "POST", body: "{}" }), envO);
+check("/events and /push need the key", evx.status === 403 && pux.status === 403);
+const pok = await worker.fetch(new Request("https://w.dev/push?key=k", { method: "POST", body: JSON.stringify({ floor: "F2" }) }), envO);
+check("/push with the key saves", pok.status === 200 && envO.RADAR_KV.m.get("push:floor") === "F2");
+let dispatched = null;
+const ghFetch = async (url, opts) => { if (String(url).includes("/dispatches")) { dispatched = String(url); return { status: 204, text: async () => "" }; } return fakeFetch(url, opts); };
+globalThis.fetch = ghFetch;
+const rf = await reply(om("/refresh"), envO, ghFetch);
+globalThis.fetch = fakeFetch;
+check("/refresh starts operator.yml on GitHub", rf.text.includes("Running the Operator") && dispatched && dispatched.includes("operator.yml"), [rf, dispatched]);
+const runOp = await worker.fetch(new Request("https://w.dev/run?wf=nope.yml&key=k"), envO);
+check("/run still refuses unknown workflows", runOp.status === 400);
+check("/pro no longer promises a sale inside Telegram", (await reply({ message: { chat: { id: 6, type: "private" }, from: { id: 78 }, text: "/pro" } }, envO, fakeFetch)).text.includes("Nothing is sold or paid inside Telegram"));
+
+// ── v1.80 audits and savings from the owner desk ────────────────────────
+const nBefore = [...envO.RADAR_KV.m.keys()].filter(k => k.startsWith("ev:")).length;
+for (const t of ["/audit new FitCo | B0PULL0002 | 1399", "/quote A1 Shree price=520 moq=100 written=yes", "/deal https://ekaro.in/x Ajio jackets", "/card https://ekaro.in/c Axis card | 5% back"]) {
+  const r = await reply(om(t), envO, fakeFetch);
+  check(`owner ${t.split(" ")[0]} is queued`, r.text.startsWith("✍️ Queued"), r);
+}
+check("four new queue entries", [...envO.RADAR_KV.m.keys()].filter(k => k.startsWith("ev:")).length === nBefore + 4);
+check("/audits before any run explains", (await reply(om("/audits"), envO, fakeFetch)).text.includes("No open audits"));
+await pushJson(envO, { audits: "🧾 1 open audit", queue: "🛍 Waiting to post" });
+check("/audits and /queue answer from what the Operator pushed (not queued)", (await reply(om("/audits"), envO, fakeFetch)).text.includes("open audit")
+  && (await reply(om("/queue"), envO, fakeFetch)).text.includes("Waiting") && [...envO.RADAR_KV.m.keys()].filter(k => k.startsWith("ev:")).length === nBefore + 4);
+const strangerDeal = await reply({ message: { chat: { id: 5, type: "private" }, from: { id: 5 }, text: "/deal https://ekaro.in/x spam" } }, envO, fakeFetch);
+check("a stranger cannot queue a deal", !strangerDeal.text.includes("Queued"));
 
 console.log(fails ? `\n${fails} FAILED` : "\nALL PASS");
 process.exit(fails ? 1 : 0);

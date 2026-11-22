@@ -3,9 +3,8 @@ name: Bazaar Radar — Growth snapshot (daily) + review (Mondays)
 # v1.60. Counts what the plan's kill lines need: channel members, joins per invite link, bot use, X spend.
 # Mondays it also sends the kill-line review and the goal worked backwards to the admin chat.
 # No Amazon requests. Telegram + Google Sheets only (~20 s). Times are UTC: 16:30 UTC = 22:00 IST.
+# v1.70: the nightly schedule moved to operator.yml (it runs these same counts first). Kept for a manual run.
 on:
-  schedule:
-    - cron: "30 16 * * *"
   workflow_dispatch:
     inputs:
       report:

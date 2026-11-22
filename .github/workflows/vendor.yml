@@ -1,0 +1,59 @@
+name: Bazaar Radar — Vendor run (Mondays)
+
+# v1.70. The weekly category Radar to every paying seller (email, or to you to forward), new seller leads with their
+# messages ready (/leads in the bot), and the drop-ship shortlist. 03:00 UTC = 08:30 IST Monday, after the daily fetch.
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: vendor
+  cancel-in-progress: false
+
+jobs:
+  vendor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests pandas beautifulsoup4 gspread google-auth openpyxl
+      - name: Vendor run
+        env:
+          BR_MODE:             vendor
+          VENDOR_LEADS_PER_WEEK: ${{ vars.VENDOR_LEADS_PER_WEEK || '5' }}
+          GOOGLE_CREDS_JSON:   ${{ secrets.GOOGLE_CREDS_JSON }}
+          GOOGLE_SHEET_ID:     ${{ secrets.GOOGLE_SHEET_ID }}
+          AFFILIATE_SHEET_ID:  ${{ secrets.AFFILIATE_SHEET_ID }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+          AFFILIATE_TAG:       ${{ secrets.AFFILIATE_TAG }}
+          AFFILIATE_CHAT_ID:   ${{ secrets.AFFILIATE_CHAT_ID }}
+          AFFILIATE_BOT_TOKEN: ${{ secrets.AFFILIATE_BOT_TOKEN }}
+          AFF_TAGS:            ${{ vars.AFF_TAGS }}               # telegram=…-21, telegram.durable=…-21, whatsapp=…-21, x=…-21, bot=…-21
+          BR_GOAL_INR:         ${{ vars.BR_GOAL_INR || '50000' }}
+          WORKER_URL:          ${{ vars.WORKER_URL }}             # https://<worker>.workers.dev (the bot's command queue + /floor)
+          WORKER_STATS_URL:    ${{ vars.WORKER_STATS_URL }}
+          WORKER_KEY:          ${{ secrets.WORKER_KEY }}          # the Worker's RUN_KEY
+          RAZORPAY_KEY_ID:     ${{ secrets.RAZORPAY_KEY_ID }}     # optional: payment links for sellers (off without both)
+          RAZORPAY_KEY_SECRET: ${{ secrets.RAZORPAY_KEY_SECRET }}
+          SMTP_HOST:           ${{ secrets.SMTP_HOST }}           # optional: the weekly Radar by email (else it comes to you to forward)
+          SMTP_PORT:           ${{ secrets.SMTP_PORT }}
+          SMTP_USER:           ${{ secrets.SMTP_USER }}
+          SMTP_PASS:           ${{ secrets.SMTP_PASS }}
+          SMTP_FROM:           ${{ secrets.SMTP_FROM }}
+          VENDOR_SENDER:       ${{ vars.VENDOR_SENDER }}          # the name under outreach messages, e.g. "Ayaz, OneZero"
+          VENDOR_REPLY_TO:     ${{ vars.VENDOR_REPLY_TO }}
+          AMZ_FEES:            ${{ vars.AMZ_FEES }}               # optional fee overrides, e.g. {"gst": 0.12}
+          VENDOR_OFFER:        ${{ vars.VENDOR_OFFER || 'audit' }}  # v1.80: what outreach sells after the free page: audit | radar | both
+          AUDIT_FEE_SKU:       ${{ vars.AUDIT_FEE_SKU || '10000' }}
+          AUDIT_FEE_CATEGORY:  ${{ vars.AUDIT_FEE_CATEGORY || '20000' }}
+          AUDIT_ADVANCE_PCT:   ${{ vars.AUDIT_ADVANCE_PCT || '0.5' }}
+          AUDIT_DELIVER_TO:    ${{ vars.AUDIT_DELIVER_TO }}       # the city suppliers quote freight to, e.g. "Pune 411001"
+          SAVINGS_SLOTS:       ${{ vars.SAVINGS_SLOTS || '13,19' }}
+          CARDS_PER_WEEK:      ${{ vars.CARDS_PER_WEEK || '2' }}
+          SAVINGS_DOMAINS:     ${{ vars.SAVINGS_DOMAINS || 'ekaro.in,earnkaro.com' }}
+        run: python trend_fetcher.py

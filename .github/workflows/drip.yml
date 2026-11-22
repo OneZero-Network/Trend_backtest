@@ -57,4 +57,10 @@ jobs:
           AFF_COPY_AGENT:      ${{ vars.AFF_COPY_AGENT }}         # 'claude' = rewrite X hooks for variety (fact-checked); empty = templates only
           AFF_COPY_MODEL:      ${{ vars.AFF_COPY_MODEL || 'claude-haiku-5-5' }}
           ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
+          WORKER_URL:          ${{ vars.WORKER_URL }}             # v1.80: picks up /deal and /card from the bot
+          WORKER_KEY:          ${{ secrets.WORKER_KEY }}
+          SAVINGS_SLOTS:       ${{ vars.SAVINGS_SLOTS || '13,19' }}      # IST hours for EarnKaro deals / card offers ('' = off)
+          SAVINGS_PER_DAY:     ${{ vars.SAVINGS_PER_DAY || '2' }}
+          CARDS_PER_WEEK:      ${{ vars.CARDS_PER_WEEK || '2' }}
+          SAVINGS_DOMAINS:     ${{ vars.SAVINGS_DOMAINS || 'ekaro.in,earnkaro.com' }}
         run: python trend_fetcher.py

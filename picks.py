@@ -28,6 +28,11 @@ def affiliate_link(asin, tag):
     return f"https://www.amazon.in/dp/{asin}" + (f"?tag={tag}" if tag else "")
 
 
+def _tag(tag, p):
+    """v1.60: `tag` may be a store ID or a function pick-row → ID (one tracking ID per channel / arm, see tags.py)."""
+    return tag(p) if callable(tag) else tag
+
+
 MIN_DAYS_ON_LIST = 3      # one-day entrants at the tail of the list are churn, not trends
 MIN_RANK_GAIN = 10        # a pick must have actually climbed ≥10 places (week 1: a product that FELL was picked)
 
@@ -436,7 +441,7 @@ def post_text(picks, tag, week_label, scorecard_line=""):
     lines = [f"🔍 {POST_TITLE} — {week_label}", ""]
     for i, (_, p) in enumerate(picks.iterrows(), 1):
         seas = f" ({p['seasonal'].replace('SEASONAL: ', '')})" if str(p.get("seasonal", "")).startswith("SEASONAL") else ""
-        lines.append(f"{i}. {str(p['title'])[:90]}{seas}\n   {affiliate_link(p['asin'], tag)}")
+        lines.append(f"{i}. {str(p['title'])[:90]}{seas}\n   {affiliate_link(p['asin'], _tag(tag, p))}")
     lines += ["", DISCLOSURE]
     if scorecard_line:
         lines += ["", scorecard_line]
@@ -553,7 +558,7 @@ def _compact_line(f):
     return f"holding #{int(now)}"
 
 
-def post_messages(picks_df, hist, tag, today, cat_names=None, week_label="", style=None):
+def post_messages(picks_df, hist, tag, today, cat_names=None, week_label="", style=None, footer=""):
     """Telegram HTML. style 'single' → [one message]; 'per_product' → [header, msg1, msg2, ...].
     Biggest climbers first. No prices (Associates rules)."""
     style = (style or POST_STYLE)
@@ -571,8 +576,10 @@ def post_messages(picks_df, hist, tag, today, cat_names=None, week_label="", sty
         for i, (_, p, f, cname) in enumerate(items, 1):
             seas = str(p.get("seasonal", ""))
             tag_s = f" · 📅 {_h(seas.replace('SEASONAL: ', ''))}" if seas.startswith("SEASONAL") else ""
-            lines.append(f"{i}. <a href=\"{_h(affiliate_link(p['asin'], tag))}\">{_h(short_title(p['title']))}</a>\n"
+            lines.append(f"{i}. <a href=\"{_h(affiliate_link(p['asin'], _tag(tag, p)))}\">{_h(short_title(p['title']))}</a>\n"
                          f"    {_icon(f)} {_h(cname)} · {_compact_line(f)}{tag_s}")
+        if footer:                                  # v1.60 share loop: forward line + named join link (already HTML-safe)
+            lines += ["", footer]
         lines += ["", f"<i>{_h(DISCLOSURE)}</i>"]
         return ["\n".join(lines)]
     header = (f"🔍 <b>{_h(POST_TITLE)}</b> — {_h(week_label)}\n"
@@ -582,7 +589,7 @@ def post_messages(picks_df, hist, tag, today, cat_names=None, week_label="", sty
     for _, p, f, cname in items:
         seas = str(p.get("seasonal", ""))
         seas_line = f"\n📅 Seasonal: {_h(seas.replace('SEASONAL: ', ''))}" if seas.startswith("SEASONAL") else ""
-        link = _h(affiliate_link(p["asin"], tag))
+        link = _h(affiliate_link(p["asin"], _tag(tag, p)))
         # title and a button-style line are hyperlinks; no price (Associates rules: prices only via PA-API)
         msgs.append(f"<a href=\"{link}\"><b>{_h(str(p['title'])[:110])}</b></a>\n\n{trend_line(f, _h(cname))}{seas_line}\n\n"
                     f"👉 <a href=\"{link}\"><b>Check today's price on Amazon</b></a>\n\n<i>{SHORT_AD}</i>")
@@ -622,7 +629,7 @@ def x_weight(text):
 
 
 def x_text(p, f, cname, tag):
-    link = affiliate_link(p["asin"], tag)
+    link = affiliate_link(p["asin"], _tag(tag, p))
     line = _plain_line(f, cname)
     title = str(p["title"])
     for cut in range(len(title), 10, -5):              # shorten the title until it fits
@@ -637,25 +644,25 @@ def wa_text(p, f, cname, tag):
     """WhatsApp formatting: *bold*, plain link (WhatsApp shows the preview)."""
     seas = str(p.get("seasonal", ""))
     s = f"\n📅 Seasonal: {seas.replace('SEASONAL: ', '')}" if seas.startswith("SEASONAL") else ""
-    return (f"*{str(p['title'])[:110]}*\n\n{_icon(f)} {_plain_line(f, cname)}{s}\n\n{affiliate_link(p['asin'], tag)}\n\n"
+    return (f"*{str(p['title'])[:110]}*\n\n{_icon(f)} {_plain_line(f, cname)}{s}\n\n{affiliate_link(p['asin'], _tag(tag, p))}\n\n"
             f"_#ad · Amazon Associate link_")
 
 
-def share_kit(picks_df, hist, tag, today, cat_names=None):
+def share_kit(picks_df, hist, tag, today, cat_names=None, wa_tag=None):
     """→ list of dicts per pick: x_text, wa_text, x_intent (one-tap tweet), wa_share (one-tap WhatsApp)."""
     out = []
     for _, p in picks_df.iterrows():
         cat = p.get("category_slug") or p.get("category")
         f = facts_for(p, hist, today)
         cname = (cat_names or {}).get(cat, cat)
-        xt, wt = x_text(p, f, cname, tag), wa_text(p, f, cname, tag)
+        xt, wt = x_text(p, f, cname, tag), wa_text(p, f, cname, wa_tag if wa_tag is not None else tag)
         out.append({"asin": p["asin"], "x_text": xt, "wa_text": wt,
                     "x_intent": "https://twitter.com/intent/tweet?text=" + _q(xt),
                     "wa_share": "https://wa.me/?text=" + _q(wt)})
     return out
 
 
-def wa_bundle(picks_df, hist, tag, today, cat_names=None, n=5, label=""):
+def wa_bundle(picks_df, hist, tag, today, cat_names=None, n=5, label="", footer=""):
     """ONE WhatsApp post with the day's top picks. WhatsApp can't hyperlink words, so every product
     gets its full link on its own line (WhatsApp makes it tappable)."""
     lines = [f"*🔍 OneZero Deals — {label or today}*", ""]
@@ -664,7 +671,9 @@ def wa_bundle(picks_df, hist, tag, today, cat_names=None, n=5, label=""):
         f = facts_for(p, hist, today)
         cname = (cat_names or {}).get(cat, cat)
         lines += [f"{i}. *{short_title(p['title'], 55)}*", f"{_icon(f)} {_plain_line(f, cname)}",
-                  f"👉 {affiliate_link(p['asin'], tag)}", ""]
+                  f"👉 {affiliate_link(p['asin'], _tag(tag, p))}", ""]
+    if footer:
+        lines += [footer, ""]
     lines.append("_#ad · As an Amazon Associate I earn from qualifying purchases._")
     text = "\n".join(lines)
     return text, "https://wa.me/?text=" + _q(text)

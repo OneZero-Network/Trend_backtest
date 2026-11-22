@@ -37,6 +37,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from discount_rule import discount_status            # shared with backtest — one rule
 import calculator, compliance, youtube_check, sourcing, picks, brief, discovery, automation, season, toolwatch
 import capture, resell_gate, durable
+import tags as aff_tags, xpost, radar_index
+import content as content_agent, growth as growth_agent
 from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree as ET
 
@@ -58,7 +60,7 @@ except ImportError:
     cffi_requests = None
     HAS_CURL_CFFI = False
 
-VERSION = "1.52"        # the ONE place the version lives (digest header, log banner, Tool Watch digest)
+VERSION = "1.60"        # the ONE place the version lives (digest header, log banner, Tool Watch digest)
 IST = timezone(timedelta(hours=5, minutes=30))
 NOW_IST = datetime.now(IST)
 TODAY = NOW_IST.strftime("%Y-%m-%d")
@@ -130,7 +132,7 @@ YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 BR_YT_TOP_N     = int(os.environ.get("BR_YT_TOP_N", "15"))       # ≈101 quota units each; free quota 10,000/day
 # State trends run in their own weekly workflow (BR_MODE=states), not in the daily run:
 # ~20 rate-limited Google calls would slow the daily run and risk blocking rising-queries.
-BR_MODE         = os.environ.get("BR_MODE") or "daily"          # daily | states | sourcing | affiliate | brief | estimate | drip | discover | automation | toolwatch
+BR_MODE         = os.environ.get("BR_MODE") or "daily"          # daily | states | sourcing | affiliate | brief | estimate | drip | discover | automation | toolwatch | growth
 BR_SOURCING_TOP_N   = int(os.environ.get("BR_SOURCING_TOP_N") or "20")     # products searched per run
 AFFILIATE_TAG     = os.environ.get("AFFILIATE_TAG") or ""         # your Amazon Associates tag, e.g. name-21
 AFFILIATE_GROUPS = os.environ.get("AFFILIATE_GROUPS") or ""
@@ -138,7 +140,15 @@ AFFILIATE_GROUPS = os.environ.get("AFFILIATE_GROUPS") or ""
 AFFILIATE_SHEET_ID = os.environ.get("AFFILIATE_SHEET_ID") or ""     # separate Google Sheet for affiliate tabs
 BR_POOL_SIZE       = int(os.environ.get("BR_POOL_SIZE") or 12)
 BR_DURABLE_SHARE   = min(1.0, max(0.0, float(os.environ.get("BR_DURABLE_SHARE") or 0.67)))   # v1.51: share of public picks from the durable arm (0 = momentum only)
-BR_CALC_DURABLE_N  = int(os.environ.get("BR_CALC_DURABLE_N") or 10)                           # v1.51: of BR_CALC_TOP_N calculator slots, durable first
+BR_CALC_DURABLE_N  = int(os.environ.get("BR_CALC_DURABLE_N") or 10)
+# v1.60 growth machine (see README "v1.60" and the strategic plan) — everything that costs money is off by default
+AFF_WA_HOURS       = [int(h) for h in (os.environ.get("AFF_WA_HOURS") or "").split(",") if h.strip()]   # EXTRA WhatsApp-ready batches (the daily one is always sent)
+WA_CHANNEL_URL     = (os.environ.get("WA_CHANNEL_URL") or "").strip()
+BR_ROUNDUP_HOUR    = int(os.environ.get("BR_ROUNDUP_HOUR") or 11)        # Sunday "lasting bestsellers" post
+BR_POLL_HOUR       = int(os.environ.get("BR_POLL_HOUR") or 19)           # Wednesday poll (0 = off)
+BR_GOAL_INR        = float(os.environ.get("BR_GOAL_INR") or 50000)
+WORKER_STATS_URL   = (os.environ.get("WORKER_STATS_URL") or "").strip()  # https://<worker>.workers.dev/stats
+WORKER_KEY         = (os.environ.get("WORKER_KEY") or "").strip()                           # v1.51: of BR_CALC_TOP_N calculator slots, durable first
 BR_STOCK_PREVIEW   = (os.environ.get("BR_STOCK_PREVIEW") or "1") != "0"   # admin-only early stock-gate look
 BR_POOL_PER_GROUP  = int(os.environ.get("BR_POOL_PER_GROUP") or 6)
 DRIP_SLOTS_IST     = [int(h) for h in (os.environ.get("BR_DRIP_HOURS") or "9,11,13,15,17,19,21").split(",") if h.strip()]
@@ -1951,10 +1961,12 @@ def build_pool(store, astore, hist, sig, last, targets):
         cutoff = (pd.Timestamp(last) - timedelta(days=14)).strftime("%Y-%m-%d")
         old = old[(old["date"] != last) & (old["date"] >= cutoff)]
     astore.write("AFF_POOL", pd.concat([old, pool.astype(str)], ignore_index=True) if not old.empty else pool.astype(str))
-    kit = picks.share_kit(pool.drop_duplicates("asin"), hist, AFFILIATE_TAG, last, cat_names=CATEGORIES)
+    T, gl = aff_tags.Tags(AFFILIATE_TAG), growth_links(astore)          # v1.60: own tracking ID per channel + share footer
+    kit = picks.share_kit(pool.drop_duplicates("asin"), hist, T.for_pick("x"), last, cat_names=CATEGORIES,
+                          wa_tag=T.for_pick("whatsapp"))
     astore.write("SHARE_KIT", pd.DataFrame(kit))
-    wa_txt, wa_url = picks.wa_bundle(pool.drop_duplicates("asin"), hist, AFFILIATE_TAG, last, cat_names=CATEGORIES,
-                                     label=NOW_IST.strftime("%d %b"))
+    wa_txt, wa_url = picks.wa_bundle(pool.drop_duplicates("asin"), hist, T.for_pick("whatsapp"), last, cat_names=CATEGORIES,
+                                     label=NOW_IST.strftime("%d %b"), footer=content_agent.wa_footer(gl, WA_CHANNEL_URL))
     send_telegram(f"📲 <b>WhatsApp post of the day</b> — <a href=\"{_esc(wa_url)}\">tap here</a>, choose your channel, send. "
                   "(On a computer: copy the text below into the channel.)")
     send_telegram(_esc(wa_txt))
@@ -2065,6 +2077,206 @@ def flipkart_lane(store, astore, targets, hist):
     astore.write("FK_POST_LOG", pd.concat([fl, rows], ignore_index=True) if not fl.empty else rows)
 
 
+# ══════════════════════════════════════════════════════════════════════
+# v1.60 GROWTH MACHINE — share loop, WhatsApp assist, X agent, weekly formats, growth ledger
+# ══════════════════════════════════════════════════════════════════════
+def growth_links(astore):
+    """{name: invite link} from GROWTH_LINKS (created by the growth job). {} until the first growth run."""
+    try:
+        gl = astore.read("GROWTH_LINKS")
+        return dict(zip(gl["name"].astype(str), gl["link"].astype(str))) if not gl.empty else {}
+    except Exception:
+        return {}
+
+
+def _send_to(chat, text, token=None):
+    global TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN
+    own, own_tok = TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN
+    TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN = chat, token or AFFILIATE_BOT_TOKEN or TELEGRAM_BOT_TOKEN
+    try:
+        send_telegram(text)
+    finally:
+        TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN = own, own_tok
+
+
+def weekly_formats(store, astore, hist, pool, last, targets, TAGS, glinks):
+    """Sunday roundup (BR_ROUNDUP_HOUR) and Wednesday poll (BR_POLL_HOUR), once per day each. → log rows."""
+    wd, hour = NOW_IST.weekday(), NOW_IST.hour
+    plog = astore.read("AFF_POST_LOG")
+    done = set()
+    if not plog.empty and "group" in plog:
+        done = set(plog.loc[plog["posted_at"].astype(str).str[:10] == TODAY, "group"].astype(str))
+    stamp, out = NOW_IST.strftime("%Y-%m-%d %H:%M"), []
+    if wd == 6 and hour == BR_ROUNDUP_HOUR and "roundup" not in done:
+        txt = content_agent.roundup(store.read("TREND_SIGNALS"), TAGS.for_pick("telegram"), picks.affiliate_link,
+                                    CATEGORIES, picks.POST_TITLE, links=glinks, disclosure=picks.DISCLOSURE)
+        if txt:
+            for _, chat, _c in targets:
+                _send_to(chat, txt)
+            out.append({"posted_at": stamp, "group": "roundup", "chat": "all", "asin": "", "title": "Sunday roundup",
+                        "link": "", "arm": "durable", "channel": "telegram", "tag": TAGS.tag("telegram")})
+    if BR_POLL_HOUR and wd == 2 and hour == BR_POLL_HOUR and "poll" not in done:
+        today_pool = pool[pool["date"].astype(str) == str(last)] if not pool.empty else pool
+        pl = content_agent.poll(today_pool)
+        tok = AFFILIATE_BOT_TOKEN or TELEGRAM_BOT_TOKEN
+        if pl and tok:
+            for _, chat, _c in targets:
+                r = _tg_post(f"https://api.telegram.org/bot{tok}/sendPoll", json={"chat_id": chat, **pl}, timeout=20)
+                if r is not None and r.status_code != 200:
+                    log(f"Poll HTTP {r.status_code}: {r.text[:200]}", "WARN")
+            out.append({"posted_at": stamp, "group": "poll", "chat": "all", "asin": "", "title": pl["question"],
+                        "link": "", "arm": "", "channel": "telegram", "tag": ""})
+    return out
+
+
+def drip_extras(astore, hist, batch, last, TAGS, glinks):
+    """After the Telegram post: WhatsApp-ready text to the admin chat (at AFF_WA_HOURS) and the X agent."""
+    out, stamp = [], NOW_IST.strftime("%Y-%m-%d %H:%M")
+    if NOW_IST.hour in AFF_WA_HOURS and TELEGRAM_CHAT_ID:
+        text, _ = picks.wa_bundle(batch, hist, TAGS.for_pick("whatsapp"), last, cat_names=CATEGORIES,
+                                  label=NOW_IST.strftime("%d %b"), footer=content_agent.wa_footer(glinks, WA_CHANNEL_URL))
+        send_telegram("📲 <b>WhatsApp Channel — copy and post</b> (tap the block to copy)\n<pre>" + _esc(text) + "</pre>"
+                      + ("" if TAGS.map.get("whatsapp") else "\n<i>Uses the default store ID — add whatsapp=… to AFF_TAGS "
+                                                             "to see WhatsApp's own clicks.</i>"))
+        out += [{"posted_at": stamp, "group": "whatsapp-assist", "chat": "admin", "asin": r["asin"],
+                 "title": str(r["title"])[:100], "link": picks.affiliate_link(r["asin"], TAGS.for_pick("whatsapp")(r)),
+                 "arm": str(r.get("arm", "")), "channel": "whatsapp", "tag": TAGS.for_pick("whatsapp")(r)}
+                for _, r in batch.head(5).iterrows()]
+    if xpost.MODE != "off":
+        out += x_agent(astore, hist, batch, last, TAGS)
+    return out
+
+
+def x_agent(astore, hist, batch, last, TAGS):
+    """One X post per drip slot at most: the batch's first durable pick (else its first pick), link-free unless
+    AFF_X_MODE=links. Every cap is checked from X_POST_LOG first. → [] (X has its own log)."""
+    xl = astore.read("X_POST_LOG")
+    rows = xl.to_dict("records") if not xl.empty else []
+    b = batch.copy()
+    b["_d"] = (b["arm"].astype(str) == "durable") if "arm" in b else False
+    p = b.sort_values("_d", ascending=False).iloc[0]
+    cat = p.get("category_slug") or p.get("category")
+    cname = CATEGORIES.get(cat, cat)
+    f = picks.facts_for(p, hist, last)
+    if xpost.MODE == "links":
+        text, variant, src = picks.x_text(p, f, cname, TAGS.for_pick("x")), "link", "template"
+    else:
+        text, variant = content_agent.x_linkfree(p, f, cname, seed=f"{last}|{NOW_IST.hour}|{p['asin']}", weight=picks.x_weight)
+        src = "template"
+        if text:
+            used = sum(1 for r in rows if str(r.get("copy", "")).startswith("claude") and str(r.get("posted_at", ""))[:7] == TODAY[:7])
+            facts = {k: v for k, v in {"title": str(p["title"])[:90], "category": cname, "rank_now": f.get("rank_now"),
+                                       "rank_7_days_ago": f.get("rank_then"), "days_on_list": f.get("dur_days"),
+                                       "days_observed": f.get("dur_window")}.items() if v is not None and str(v) != "nan"}
+            text, src = content_agent.CopyAgent().rewrite(text, facts, used, weight=picks.x_weight)
+    if not text:
+        log("X agent: no provable line for this pick — skipped"); return []
+    ok, why, est = xpost.guard(rows, text, TODAY, TODAY[:7])
+    row = {"posted_at": NOW_IST.strftime("%Y-%m-%d %H:%M"), "asin": p["asin"], "arm": str(p.get("arm", "")),
+           "mode": xpost.MODE, "variant": variant, "copy": src, "chars": picks.x_weight(text),
+           "has_url": xpost.has_url(text), "est_cost": round(est, 3), "status": "", "tweet_id": "", "text": text}
+    if not ok:
+        row["status"] = "blocked"; row["tweet_id"] = why
+        log(f"X agent: not posted — {why}")
+    elif xpost.MODE == "dry":
+        row["status"] = "dry"
+        send_telegram("🐦 <b>X dry run</b> — would post (" + f"${est:.3f}" + "):\n<pre>" + _esc(text) + "</pre>")
+    else:
+        creds = xpost.creds_from_env()
+        if not creds:
+            row["status"] = "blocked"; row["tweet_id"] = "X_API_KEY / X_API_SECRET / X_ACCESS_TOKEN / X_ACCESS_SECRET not set"
+            send_telegram("⚠️ X agent is on but its four X_ secrets are not set — nothing posted.")
+        else:
+            good, ref, code = xpost.post(text, creds)
+            row["status"], row["tweet_id"] = ("posted" if good else "failed"), ref
+            if not good:
+                send_telegram(f"⚠️ X post failed: {_esc(ref)}" + (" — check app permissions (Read and Write) and credits."
+                                                                    if code in (401, 402, 403) else ""))
+    new = pd.DataFrame([row]).astype(str)
+    astore.write("X_POST_LOG", pd.concat([xl.astype(str), new], ignore_index=True) if not xl.empty else new)
+    return []
+
+
+def main_growth():
+    """Daily growth snapshot (members, invite links, joins per link, bot use, X spend) → GROWTH ledger;
+    Mondays (or BR_GROWTH_REPORT=1): the kill-line review + the goal worked backwards → admin chat + GROWTH_REPORT."""
+    log(f"📈 BAZAAR RADAR v{VERSION} — growth · {NOW_IST.strftime('%Y-%m-%d %H:%M')} IST")
+    store = Store()
+    astore = affiliate_store(store)
+    TAGS = aff_tags.Tags(AFFILIATE_TAG)
+    ledger = astore.read("GROWTH")
+    rows, add, notes = [], {}, []
+    chat, tok = AFFILIATE_CHAT_ID.strip(), (AFFILIATE_BOT_TOKEN or TELEGRAM_BOT_TOKEN)
+    if chat and tok:
+        tg = growth_agent.TG(tok)
+        try:
+            rows.append((TODAY, "members", "telegram", growth_agent.member_count(tg, chat)))
+        except Exception as exc:
+            notes.append(f"member count failed: {exc}")
+        try:
+            links_df, created = growth_agent.ensure_links(tg, chat, astore.read("GROWTH_LINKS"), today=TODAY)
+            if created:
+                astore.write("GROWTH_LINKS", links_df)
+                notes.append("New invite links (put each where its name says):\n" + "\n".join(
+                    f"  {r['name']}: {r['link']}" for _, r in links_df.iterrows() if r["name"] in created))
+        except Exception as exc:
+            notes.append(f"invite links failed: {exc} — make the bot an admin of the channel with 'Invite users via link'.")
+        try:
+            gs = astore.read("GROWTH_STATE")
+            state = dict(zip(gs["key"].astype(str), gs["value"].astype(str))) if not gs.empty else {}
+            counts, nxt, src = growth_agent.poll_joins(tg, chat, state.get("tg_offset") or None)
+            if src == "webhook":
+                if WORKER_STATS_URL and WORKER_KEY:
+                    st = growth_agent.worker_stats(WORKER_STATS_URL, WORKER_KEY)
+                    for d, by in (st.get("joins") or {}).items():
+                        rows += [(d, "joins", k, n) for k, n in by.items()]
+                    for d, by in (st.get("bot") or {}).items():
+                        rows += [(d, "bot", k, n) for k, n in by.items()]
+                else:
+                    notes.append("The bot has a webhook (shopper bot) — set WORKER_STATS_URL and WORKER_KEY so joins are counted.")
+            else:
+                for d, by in counts.items():
+                    for k, n in by.items():
+                        add[(d, "joins", k)] = add.get((d, "joins", k), 0) + n
+                if nxt:
+                    state["tg_offset"] = str(nxt)
+                    astore.write("GROWTH_STATE", pd.DataFrame({"key": list(state), "value": list(state.values())}))
+        except Exception as exc:
+            notes.append(f"join tracking failed: {exc}")
+    else:
+        notes.append("AFFILIATE_CHAT_ID or the bot token is not set — no Telegram numbers today.")
+    xl = astore.read("X_POST_LOG")
+    if not xl.empty:
+        xl["d"] = xl["posted_at"].astype(str).str[:10]
+        for d, g in xl.groupby("d"):
+            real = g[g["status"] == "posted"]
+            rows += [(d, "x_posts", "posted", len(real)), (d, "x_posts", "blocked", int((g["status"] == "blocked").sum())),
+                     (d, "x_spend_usd", "", round(pd.to_numeric(real["est_cost"], errors="coerce").fillna(0).sum(), 3))]
+    for (d, m, k), n in add.items():                       # getUpdates counts are increments: add to what is there
+        prev = growth_agent.series(ledger, m, k)
+        rows.append((d, m, k, n + (float(prev.get(d)) if d in prev.index else 0)))
+    ledger = growth_agent.add_rows(ledger, rows)
+    astore.write("GROWTH", ledger)
+    if NOW_IST.weekday() == 0 or os.environ.get("BR_GROWTH_REPORT") == "1":
+        assoc = growth_agent.parse_assoc(astore.read("ASSOC_REPORT"), TAGS)
+        gi = astore.read("GROWTH_INPUT")
+        inputs = dict(zip(gi["key"].astype(str), gi["value"].astype(str))) if not gi.empty and "key" in gi else {}
+        rep_rows, lines = growth_agent.review(ledger, TODAY, assoc, inputs, goal=BR_GOAL_INR)
+        old = astore.read("GROWTH_REPORT")
+        new = pd.DataFrame(rep_rows).astype(str)
+        astore.write("GROWTH_REPORT", pd.concat([old, new], ignore_index=True) if not old.empty else new)
+        used, own = TAGS.summary()
+        lines += ["", "Tracking IDs: " + (", ".join(f"{ch} = {used[ch]}" for ch in own) if own else
+                  "only the default store ID — create one per channel in Associates Central and set AFF_TAGS.")]
+        if not assoc:
+            lines.append("No Associates report yet — paste last week's tracking-ID report into the ASSOC_REPORT tab.")
+        send_telegram(f"📈 <b>Growth review — week to {TODAY}</b>\n" + "\n".join(_esc(l) for l in lines)
+                      + ("\n\n" + "\n".join(_esc(n) for n in notes) if notes else ""))
+    elif notes:
+        send_telegram("📈 <b>Growth snapshot</b>\n" + "\n".join(_esc(n) for n in notes))
+    log(f"Growth: {len(rows) + len(add)} ledger values written")
+
+
 def main_drip():
     """Runs every 2 h (9 am–9 pm IST). Builds today's pool on first run, then posts the next 1–2 picks."""
     global TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN
@@ -2106,6 +2318,13 @@ def main_drip():
     hour = NOW_IST.hour
     left = slots_left(hour)
     logs, posted_total = [], 0
+    TAGS = aff_tags.Tags(AFFILIATE_TAG)
+    glinks = growth_links(astore)
+    try:
+        logs += weekly_formats(store, astore, hist, pool, last, targets, TAGS, glinks)
+    except Exception as exc:
+        log_tb("weekly formats", exc)
+    posted_batches = []
     for name, chat, _ in targets:
         pend = pool[(pool["date"] == last) & (pool["chat"] == str(chat)) & (pool["status"] == "pending")].copy()
         if pend.empty:
@@ -2115,8 +2334,8 @@ def main_drip():
         k = -(-len(pend) // left)                       # spread what's left over the remaining slots
         batch = pend.head(k)
         label = f"{NOW_IST.strftime('%d %b')} · {NOW_IST.strftime('%I %p').lstrip('0')}"
-        msgs = picks.post_messages(batch, hist, AFFILIATE_TAG, last, cat_names=CATEGORIES,
-                                   week_label=label, style="single")
+        msgs = picks.post_messages(batch, hist, TAGS.for_pick("telegram"), last, cat_names=CATEGORIES,
+                                   week_label=label, style="single", footer=content_agent.telegram_footer(glinks))
         own, own_tok = TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN
         TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN = chat, AFFILIATE_BOT_TOKEN or TELEGRAM_BOT_TOKEN
         try:
@@ -2128,17 +2347,26 @@ def main_drip():
         pool.loc[batch.index, "status"] = "posted"
         pool.loc[batch.index, "posted_at"] = stamp
         logs += [{"posted_at": stamp, "group": name, "chat": chat, "asin": r["asin"], "title": r["title"][:100],
-                  "link": picks.affiliate_link(r["asin"], AFFILIATE_TAG),
-                  "arm": r["arm"] if "arm" in r.index and str(r["arm"]) not in ("", "nan") else "momentum"}   # v1.51: join with AFF_ACTUALS by arm
+                  "link": picks.affiliate_link(r["asin"], TAGS.for_pick("telegram")(r)),
+                  "arm": r["arm"] if "arm" in r.index and str(r["arm"]) not in ("", "nan") else "momentum",   # v1.51: join with AFF_ACTUALS by arm
+                  "channel": "telegram", "tag": TAGS.for_pick("telegram")(r)}                              # v1.60: tracking ID used
                  for _, r in batch.iterrows()]
         posted_total += len(batch)
-    if not posted_total:
+        posted_batches.append(batch)
+    if posted_batches:
+        try:
+            logs += drip_extras(astore, hist, pd.concat(posted_batches), last, TAGS, glinks)
+        except Exception as exc:
+            log_tb("WhatsApp / X agents", exc)
+    if not posted_total and not logs:
         log("Drip: today's pool is fully posted"); return
     astore.write("AFF_POOL", pool.drop(columns=[c for c in pool.columns if c.startswith("_")]))
     old = astore.read("AFF_POST_LOG")
     new = pd.DataFrame(logs).astype(str)
     astore.write("AFF_POST_LOG", pd.concat([old, new], ignore_index=True) if not old.empty else new)
     log(f"Drip: posted {posted_total} pick(s)")
+    for prob in TAGS.problems:
+        log(f"AFF_TAGS: '{prob}' is not a valid tracking ID (must end like -21) — the default store ID was used", "WARN")
     if not AFFILIATE_TAG:
         send_telegram("⚠️ AFFILIATE_TAG not set — drip links carry no Associates tag.")
 
@@ -3059,6 +3287,8 @@ def main():
         return main_discover()
     if BR_MODE == "drip":
         return main_drip()
+    if BR_MODE == "growth":
+        return main_growth()
     if BR_MODE == "estimate":
         return main_estimate()
     if BR_MODE == "sourcing":
@@ -3172,6 +3402,14 @@ def main():
             written["TREND_SIGNALS"] = store.write("TREND_SIGNALS", signals)
     except Exception as exc:
         log_tb("compliance flags", exc)
+
+    # ── v1.60: the shopper bot's daily index (the archive step pushes it to the data-archive branch)
+    try:
+        if not signals.empty:
+            _ix = radar_index.build(signals, hist, TODAY, CATEGORIES, version=VERSION)
+            log(f"Bot index: {len(_ix['items'])} products → {radar_index.write(_ix, LOCAL_OUT_DIR)}")
+    except Exception as exc:
+        log_tb("bot index", exc)
 
     # ── YouTube review-video check (optional, needs YOUTUBE_API_KEY)
     try:

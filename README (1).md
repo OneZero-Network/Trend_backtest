@@ -130,6 +130,53 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.60: the growth machine — measured channels, a share loop, an X agent and a shopper bot
+The strategy is in the doc **"OneZero Growth Machine — Strategic Plan"**. This release builds the parts the plan needs. The plan's core finding: at assumed rates, ₹50,000 a month from affiliate links alone needs about 52,000 engaged members. Members are the bottleneck, so the machine measures where they come from before it tries to scale anything.
+
+**Nothing here spends money or posts anywhere new until you switch it on.** X is `off`, the copy agent is off, and the shopper bot runs only once you deploy the Worker update.
+
+### What is new
+| Part | File | What it does | Default |
+|---|---|---|---|
+| Tracking IDs per channel | `tags.py` | Each link carries its channel's Associates tracking ID (`telegram`, `whatsapp`, `x`, `bot`, optionally `telegram.durable`), so Amazon's report says **where** a click came from | falls back to `AFFILIATE_TAG` |
+| Share loop | `content.py` | Every Telegram post ends with a forward line and a named join link (`tg-forward`). The daily WhatsApp text carries your channel link and its own Telegram link (`wa-channel`) | on (`AFF_SHARE_FOOTER=0` turns it off) |
+| Weekly formats | `content.py` | Sunday "lasting bestsellers" roundup (one per category, only "N days on the list" claims); Wednesday poll from the day's picks | on: Sun 11:00, Wed 19:00 |
+| X agent | `xpost.py` | OAuth 1.0a poster (signature verified against Twitter's published example). **Link-free** posts from rotating templates. Never replies, likes, follows or uses hashtags. Caps of 4 a day and $10 a month are checked from `X_POST_LOG` before every call; duplicate text is refused | `AFF_X_MODE=off` |
+| Copy agent | `content.py` | Optional Claude (Haiku) rewrite of X hooks for variety. Every draft is fact-checked: a number not in our data, a link, a hashtag or a hype word sends it back to the template | off |
+| Growth ledger + review | `growth.py`, `growth.yml` | Daily: channel members, a named invite link per source (created once), joins per link, bot use, X spend → `GROWTH`. Mondays: every kill line from the plan with its value and status, plus the goal worked backwards with **measured** rates once an Associates report is pasted → admin chat + `GROWTH_REPORT` | daily 22:00 IST |
+| Shopper bot (the product) | `cloudflare_worker/worker.js`, `radar_index.py` | Send @OneZeroDeals_bot any Amazon.in link or ASIN: it answers with what we observed (days on the list out of 14, rank now and a week ago, climbing / steady / slipping), a tagged link and the join link. `/top <category>`, `/pro` (seller waitlist → admin chat). Counts channel joins per invite link and bot use in KV and serves `/stats` | off until deployed |
+
+New sheet tabs (in the affiliate sheet if you use one): `GROWTH`, `GROWTH_LINKS`, `GROWTH_STATE`, `GROWTH_REPORT`, `X_POST_LOG`. Two are yours to fill: `ASSOC_REPORT` (paste the weekly tracking-ID report) and `GROWTH_INPUT` (`key`,`value` rows: `paying_sellers`, `waitlist_opened`). `AFF_POST_LOG` gains `channel` and `tag` columns.
+
+### Switch it on, in this order
+1. **Associates (10 min).** Create tracking IDs for Telegram, WhatsApp, X and the bot under Account → Manage Your Tracking IDs. List every place you post in your Associates profile (Telegram channel URL, WhatsApp Channel URL, X profile, the bot's t.me link). Until a place is listed, don't post tagged links there.
+2. **Repo variables:** `AFF_TAGS` = `telegram=…-21, whatsapp=…-21, x=…-21, bot=…-21` and `WA_CHANNEL_URL`.
+3. **Telegram:** the posting bot must be a channel admin with **"Invite users via link"**. Run the *Growth snapshot* workflow once by hand. The admin chat lists the new invite links. Put `x-bio` in your X profile, `wa-channel` in the WhatsApp Channel description, `site` on your website, and keep `swap-1`/`swap-2` for cross-promotion swaps.
+4. **X (optional):** create an app with Read and Write, buy credits, set a monthly spend limit **in the X console**, and add the secrets `X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_SECRET`. Set `AFF_X_MODE=dry` for a week (the admin chat shows what it would post), then `linkfree`. Only use `links` after X is listed in Associates; it costs about $0.20 a post.
+5. **Shopper bot (optional, Phase 2):**
+   - Create the KV namespace (`npx wrangler kv namespace create RADAR_KV`) and uncomment it in `wrangler.toml`.
+   - Add the Worker secrets `BOT_TOKEN` (the public bot's token), `TG_WEBHOOK_SECRET` (any random string) and `RUN_KEY`.
+   - Give `GH_TOKEN` **Contents: Read** as well.
+   - Set `AFF_TAG_BOT` and `CHANNEL_JOIN_URL` (the `bot` link) in `wrangler.toml`, then deploy.
+   - Open `https://<worker>.workers.dev/setup?key=<RUN_KEY>` once.
+   - Set the repo variable `WORKER_STATS_URL` and the secret `WORKER_KEY` (= `RUN_KEY`). Once the webhook is set, getUpdates stops working, so the Worker counts joins instead.
+6. **Every Monday:** paste last week's tracking-ID report into `ASSOC_REPORT`; read the review.
+
+### What I verified, and what I could not
+- **Verified offline:**
+  - The OAuth signer reproduces Twitter's documented example signature exactly.
+  - 70+ new checks and 24 Worker checks (in Node, with Telegram, GitHub and KV mocked).
+  - A full daily, drip and growth run on your real 17 days of history. The bot index for 1,284 products is 172 KB.
+  - Real-data bot answers. These exposed two bugs, which are now fixed: "#?" on a falling product with no week-ago rank, and an empty name on a product with no title.
+- **Not verified:**
+  - A live X post (no account here).
+  - Live Telegram join attribution on your channel.
+  - The exact column names of India's Associates report. The importer matches them loosely; send one real export and I will pin it.
+  - The Worker on Cloudflare itself. KV counts are eventually consistent, so treat them as approximate.
+  - X's prices: they come from third-party pages citing X's April 2026 rate card, so check your Developer Console.
+- **"Going viral" cannot be built.** What is built is the loop and the meter: every post carries a join link that tells you whether forwards bring people in. The kill lines decide what continues.
+- **Still manual:** WhatsApp. I found no official way to post to Channels, and the unofficial tools risk a number ban.
+
 ## v1.52: friendlier channel posts (17 Nov)
 Feedback on the live v1.51 posts: the intro sentence was noise, the title wasn't right, and "on the list 14 of the last 14 days" was too long.
 - **Title** is now **Amazon Hidden Bestsellers** (was "Hidden Amazon Finds"). It is one setting: repo variable `AFF_POST_TITLE` (drip workflow) — change it there, no code. *Caveat:* "hidden" is a hook, not a fact — a #2 bestseller is the opposite of hidden. It is harmless, but it is the one word in the post that cannot be checked against HISTORY. Don't put "Amazon" in the channel or bot *name* (Associates rules restrict that); a post title is a different thing.

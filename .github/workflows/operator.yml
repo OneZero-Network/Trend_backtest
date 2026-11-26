@@ -41,6 +41,8 @@ jobs:
           AFFILIATE_BOT_TOKEN: ${{ secrets.AFFILIATE_BOT_TOKEN }}
           AFF_TAGS:            ${{ vars.AFF_TAGS }}               # telegram=…-21, telegram.durable=…-21, whatsapp=…-21, x=…-21, bot=…-21
           BR_GOAL_INR:         ${{ vars.BR_GOAL_INR || '50000' }}
+          CHANNEL_HANDLE:      ${{ vars.CHANNEL_HANDLE || '@onezerodeals' }}   # v1.81: named in the cross-promo kit (/promo)
+          AFF_POST_TITLE:      ${{ vars.AFF_POST_TITLE }}
           WORKER_URL:          ${{ vars.WORKER_URL }}             # https://<worker>.workers.dev (the bot's command queue + /floor)
           WORKER_STATS_URL:    ${{ vars.WORKER_STATS_URL }}
           WORKER_KEY:          ${{ secrets.WORKER_KEY }}          # the Worker's RUN_KEY

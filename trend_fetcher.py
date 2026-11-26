@@ -62,7 +62,7 @@ except ImportError:
     cffi_requests = None
     HAS_CURL_CFFI = False
 
-VERSION = "1.80"        # the ONE place the version lives (digest header, log banner, Tool Watch digest)
+VERSION = "1.81"        # the ONE place the version lives (digest header, log banner, Tool Watch digest)
 IST = timezone(timedelta(hours=5, minutes=30))
 NOW_IST = datetime.now(IST)
 TODAY = NOW_IST.strftime("%Y-%m-%d")
@@ -272,10 +272,44 @@ def split_message(text, limit=3900):
     return chunks or [""]
 
 
+HELD_POSTS = []     # v1.81: public posts the outgoing-post check stopped this run → (chat, problems)
+
+
+def _public_chat(chat):
+    """True for the public channel / groups; never for your own chat (digests carry prices and links on purpose)."""
+    c = str(chat or "").strip()
+    if not c or c == str(os.environ.get("TELEGRAM_CHAT_ID", "")).strip():
+        return False
+    pub = {str(AFFILIATE_CHAT_ID).strip()} | {str(b.split("|")[1]).strip() for b in str(AFFILIATE_GROUPS or "").split(";")
+                                              if b.count("|") == 2}
+    return c in pub
+
+
+def _hold_post(text, problems):
+    """Tell the owner which public post was held and why (straight to the owner chat — the globals may be swapped)."""
+    HELD_POSTS.append((str(TELEGRAM_CHAT_ID), problems))
+    log("Public post held: " + "; ".join(problems), "WARN")
+    own_chat, own_tok = os.environ.get("TELEGRAM_CHAT_ID", ""), os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if not (own_chat and own_tok):
+        return
+    body = ("🛑 <b>Held a channel post</b> — nothing was published:\n" + "\n".join(f"• {_esc(p)}" for p in problems)
+            + "\n\n<pre>" + _esc(re.sub(r"<[^>]+>", "", str(text))[:700]) + "</pre>")
+    try:
+        _tg_post(f"https://api.telegram.org/bot{own_tok}/sendMessage",
+                 data={"chat_id": own_chat, "text": body, "parse_mode": "HTML", "disable_web_page_preview": "true"}, timeout=20)
+    except Exception as exc:
+        log_tb("held-post notice", exc)
+
+
 def send_telegram(text):
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         log("Telegram not configured — skipping alert", "DBG")
         return
+    if _public_chat(TELEGRAM_CHAT_ID):                     # v1.81: last gate before a public chat
+        problems = compliance.post_check(text)
+        if problems:
+            _hold_post(text, problems)
+            return False
     for chunk in split_message(text):
         try:
             r = _tg_post(
@@ -748,6 +782,13 @@ def fmt_rise(v):
     return f"+{RISE_CAP:,}%+ (breakout)" if x >= RISE_CAP else f"+{x:,.0f}%"
 
 
+def related_to_seed(query, seed):
+    """v1.81: Google's 'rising' list for 'yoga mat' contained 'samsung smart tv' and 'levis jeans'. Keep a rising query
+    only if it shares a word (3+ letters, singular) with its seed."""
+    norm = lambda t: {w[:-1] if w.endswith("s") and len(w) > 3 else w for w in re.findall(r"[a-z0-9]+", str(t).lower()) if len(w) >= 3}
+    return bool(norm(query) & norm(seed))
+
+
 def fetch_rising_queries():
     try:
         from pytrends.request import TrendReq
@@ -765,6 +806,7 @@ def fetch_rising_queries():
             rq = pt.related_queries().get(kw, {}).get("rising")
             if rq is not None and not rq.empty:
                 rq = rq[~rq["query"].astype(str).str.contains(_NOISE_QUERY)]
+                rq = rq[[related_to_seed(q, kw) for q in rq["query"].astype(str)]]
                 for _, r in rq.head(10).iterrows():
                     raw = float(r["value"])
                     rows.append({"date": TODAY, "source": "rising_query", "query": r["query"],
@@ -1226,6 +1268,11 @@ def compute_signals(hist, frames):
     out.loc[_d & out["signal"].eq("• Watch"), "signal"] = "🧱 Durable"
     out.loc[_d & ~out["signal"].str.startswith("🧱"), "signal"] = out.loc[_d & ~out["signal"].str.startswith("🧱"), "signal"] + " · 🧱 durable"
     _f = out["exit_flag"].eq("falling")
+    # v1.81: 'Breakout launch · 📉 falling' contradicted itself — a falling product keeps only what is still true
+    for old, new in (("🚀 Breakout launch", "🆕 Recent launch"), ("📈 Sustained climber", "📈 Was climbing"),
+                     ("⚡ Sudden spike (verify)", "⚡ Spiked")):
+        _m = _f & out["signal"].str.startswith(old)
+        out.loc[_m, "signal"] = out.loc[_m, "signal"].str.replace(old, new, n=1, regex=False)
     out.loc[_f, "signal"] = out.loc[_f, "signal"] + " · 📉 falling"
     # QUARANTINE (mirrors backtest): an unconfirmed dip is withheld from recommendations. The daily
     # run re-evaluates it automatically: price recovers → organic score released; stays down for
@@ -1353,6 +1400,34 @@ class Store:
             path = os.path.join(LOCAL_OUT_DIR, "CALCULATOR.xlsx")
             return calculator.update_xlsx(path, signals_records, today=TODAY, refresh=all_records)
         return calculator.update_gsheet(self.wb, signals_records, today=TODAY, refresh=all_records)
+
+    LEGACY_TABS = ("AFF_ACTUALS", "COMMISSION", "SALES_ANCHORS", "SELLER_LEADS", "WAITLIST")
+    _MARKERS = ("example", "yyyy-mm-dd", "type your rate", "replace")
+
+    @classmethod
+    def is_placeholder(cls, values):
+        """A tab still holding only the template rows it was created with (nothing typed by you)."""
+        rows = [r for r in (values or [])[1:] if any(str(x).strip() for x in r)]
+        num = lambda x: re.fullmatch(r"-?\d+(\.\d+)?%?", str(x).strip().replace(",", "")) is not None
+        return all(any(m in str(x).lower() for x in r for m in cls._MARKERS) and not any(num(x) for x in r) for r in rows)
+
+    def hide_placeholder_tabs(self, tabs=None):
+        """v1.81: hide the old manual tabs the bot replaced, ONLY while they still hold template rows. → names hidden."""
+        if self.wb is None:
+            return []
+        hidden = []
+        for t in tabs or self.LEGACY_TABS:
+            try:
+                ws = self.wb.worksheet(t)
+                if ws._properties.get("hidden"):
+                    continue
+                if self.is_placeholder(ws.get_all_values()):
+                    self.wb.batch_update({"requests": [{"updateSheetProperties": {
+                        "properties": {"sheetId": ws.id, "hidden": True}, "fields": "hidden"}}]})
+                    hidden.append(t)
+            except Exception:
+                continue
+        return hidden
 
     def write(self, tab, df):
         if df is None or df.empty:
@@ -1890,8 +1965,10 @@ def main_sourcing():
     for r, e in sorted(found, key=lambda x: calculator._num(x[0].get("price")) / max(x[1]["ind_cost"], 1),
                        reverse=True)[:8]:
         price = calculator._num(r.get("price"))
+        odd = price and (e["ind_cost"] < 0.1 * price or e["ind_cost"] > price)
         lines.append(f"• {_esc(str(r.get('product', ''))[:55])}\n  Amazon ₹{price:,.0f} · IndiaMART ~₹{e['ind_cost']:,.0f} "
-                     f"({_esc(e['confidence'])}) · <a href=\"{sourcing.search_url(e['query'])}\">search</a>")
+                     f"({_esc(e['confidence'])}) · <a href=\"{sourcing.search_url(e['query'])}\">search</a>"
+                     + (" · ⚠️ check the unit (per kg / dozen / carton?) or that it is the same product" if odd else ""))
     send_telegram("\n".join(lines))
     if SHEET_PROBLEM:
         sys.exit(3)
@@ -2523,6 +2600,16 @@ def main_operator():
     _, _, rng = operator_agent.latest_assoc(money)
     rep_age = (NOW_IST.date() - datetime.strptime(rng["added"].max(), "%Y-%m-%d").date()).days if len(rng) else None
     sl = astore.read("DS_SHORTLIST")
+    _used, _own = TAGS.summary()
+    if astore is not store:
+        try:
+            old_links = store.read("GROWTH_LINKS")
+            new_links = astore.read("GROWTH_LINKS")
+            if not old_links.empty and not new_links.empty and set(old_links["link"]) != set(new_links["link"]):
+                notes.append("ℹ️ Old invite links sit in the main sheet's GROWTH_LINKS and are not counted — revoke them "
+                             "in the channel (Manage → Invite links) and delete that tab.")
+        except Exception:
+            pass
     sstate = _savings_state(astore)
     sstate, pnotes = savings.pause_check(aud, plog, TODAY, sstate)
     if pnotes:
@@ -2536,7 +2623,8 @@ def main_operator():
            "audit_month": am if (len(audits) or audit.TARGET_PER_MONTH) else None, "audit_lines": alines,
            "audit_steps": ctx_steps, "savings_lines": savings.arms_verdict(stable) + pnotes,
            "savings_queue": int((squeue["status"] == "queued").sum()), "savings_paused": paused_now,
-           "savings_on": bool(savings.SLOTS),
+           "savings_on": bool(savings.SLOTS), "tags_missing": [c for c in ("telegram", "telegram.durable", "whatsapp")
+                                                            if c not in TAGS.map],
            "bot_users": int(bu.get(TODAY)) if TODAY in bu.index else None,
            "x_line": (f"X: {int(mtd(xp))} posts this month, ${mtd(xs):.2f}" if len(xp) else ""),
            "goal_line": gline, "arms": arms, "tier": tier, "subs": nsubs, "pay_lines": pay_lines, "pilots": pil,
@@ -2581,7 +2669,13 @@ def main_operator():
     queue_txt = ("🛍 <b>Waiting to post</b> (" + ", ".join(f"{h}:00" for h in savings.SLOTS) + ")\n"
                  + "\n".join(f"{r['id']} {r['kind']}: {_esc((r['card'] + ' — ' if r['card'] else '') + r['text'][:80])}"
                               for _, r in q_wait.iterrows())) if len(q_wait) else "Nothing queued. /deal <link> <line> adds a savings offer."
-    pushed = worker_push(floor=text, leads=leads_txt, ready=ready, audits=audits_txt, queue=_fit(queue_txt))
+    try:
+        promo_txt = _fit(growth_agent.promo_kit(growth_links(astore), ledger, os.environ.get("CHANNEL_HANDLE", "@onezerodeals"),
+                                                picks.POST_TITLE, _esc))
+    except Exception as exc:
+        log_tb("promo kit", exc)
+        promo_txt = ""
+    pushed = worker_push(floor=text, leads=leads_txt, ready=ready, audits=audits_txt, queue=_fit(queue_txt), promo=promo_txt)
     log(f"Operator: {len(events)} commands, {len(uploads)} uploads, {len(pay_lines)} payment lines, "
         f"{len(pil)} pilots; pushed to the bot: {pushed}")
 
@@ -3989,6 +4083,12 @@ def main():
             lines.append(f"• {_esc(r['query'])} <i>(via {_esc(r['seed'])}, {fmt_rise(r['value'])})</i>")
     if amz_stats["ok"] == 0:
         lines.append(f"\n⚠️ All Amazon lists blocked. {_actions_url()}")
+    try:
+        gone = store.hide_placeholder_tabs()
+        if gone:
+            lines.append(f"\n🧹 Hid unused template tabs (the bot replaces them): {', '.join(gone)}")
+    except Exception as exc:
+        log(f"hide template tabs: {exc}", "WARN")
     lines.append(f"\n⏱ {time.time() - t0:.0f}s")
     send_telegram("\n".join(lines))
 

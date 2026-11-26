@@ -195,8 +195,9 @@ one = P.post_messages(ch2, H, "mytag-21", day(8), cat_names={"kitchen": "Home & 
                       week_label="week of " + day(8), style="single")
 check("v1.25: all picks in ONE message", len(one) == 1)
 check("v1.25: every pick is a tagged hyperlink, numbered", one[0].count('?tag=mytag-21">') == len(ch2) and "\n1. <a href" in one[0], one[0])
-check("v1.25: disclosure once, no ₹, under Telegram's 4096 limit",
-      one[0].count("#ad") == 1 and "₹" not in one[0] and len(one[0]) < 4096)
+check("v1.25/v1.81: #ad label upfront + the full disclosure at the end, no ₹, under Telegram's 4096 limit",
+      one[0].count("#ad") == 2 and one[0].split("\n")[0].endswith("<i>#ad</i>") and "As an Amazon Associate" in one[0]
+      and "₹" not in one[0] and len(one[0]) < 4096)
 check("v1.25: short titles cut at '|'", P.short_title("Cat Food 1kg | Ocean Fish | Hairball") == "Cat Food 1kg")
 _rq.post = _orig
 

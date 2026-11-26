@@ -9,6 +9,8 @@ Per ASIN seen on a bestseller list in the last 14 days (compact arrays keep the 
   r7 rank 7 observed days ago (null if not there) d  days on a list in the window   w  days in the window
   s  state: durable | climbing | falling | steady | new | gone     l  last date seen
   x  (falling only) the exit note, e.g. 'fell #15 → #30 in 3 days'
+  k  (v1.81, sellers) certification to check before selling, e.g. 'BIS (toys QCO)'; absent when none flagged
+  g  (v1.81, sellers) weight in kg read from the title, for the bot's /sell and /margin; absent when unknown
 Plus `top`: per category, up to 5 durable, in-stock, not-falling ASINs (for /top), and `cats`: slug → name.
 
 Only facts we observed. No prices (Associates rules) and no forecasts.
@@ -18,6 +20,8 @@ import os
 import re
 
 import pandas as pd
+
+import fees
 
 WINDOW = 14
 
@@ -77,6 +81,12 @@ def build(signals, hist, today, cat_names=None, window=WINDOW, version=""):
                               "s": state, "l": g.index.max()}
         if state == "falling" and srow is not None and str(srow.get("exit_note", "") or "") not in ("", "nan"):
             out["items"][asin]["x"] = str(srow.get("exit_note"))           # 'fell #15 → #30 in 3 days' (durable.py)
+        comp = str(srow.get("compliance", "") or "") if srow is not None else ""
+        if comp.startswith("REVIEW"):
+            out["items"][asin]["k"] = comp.replace("REVIEW:", "").split(";")[0].split("—")[0].strip()[:40]
+        kg = fees.weight_kg(titles.get(asin, ""))
+        if kg is not None:
+            out["items"][asin]["g"] = kg
     if len(sig):
         s = signals.copy()
         s = s[s["durable"].astype(str).str.lower() == "true"] if "durable" in s else s.iloc[0:0]
@@ -85,7 +95,7 @@ def build(signals, hist, today, cat_names=None, window=WINDOW, version=""):
                 s = s[s[col].fillna("").astype(str) != bad]
         if "durable_score" in s:
             s = s.assign(_d=pd.to_numeric(s["durable_score"], errors="coerce")).sort_values("_d", ascending=False)
-        for cat, g in s.groupby("category_slug"):
+        for cat, g in (s.groupby("category_slug") if "category_slug" in s else []):
             out["top"][cat] = [a for a in g["asin"] if a in out["items"]][:5]
     return out
 

@@ -159,3 +159,48 @@ def non_product(title):
     """→ '' for an ordinary product, else why it is not one (nothing to source, post or earn commission on)."""
     m = NON_PRODUCT.search(str(title or ""))
     return f"not a physical product ({m.group(0).lower()}) — bill payment / voucher / gift card / booking" if m else ""
+
+
+# ══════════════════════════════════════════════════════════════════════
+# v1.81 OUTGOING-POST CHECK — the last gate before anything reaches a public chat. Every rule here comes from a written
+# source: Amazon.in Associates (prices only from Amazon's API; no link that hides the Amazon destination), ASCI
+# (disclosure upfront, claims must be substantiated) and the CCPA dark-pattern guidelines (no false urgency).
+# ══════════════════════════════════════════════════════════════════════
+import html as _html
+
+_LINK = re.compile(r"https?://[^\s\"'<>]+", re.I)
+_AFF = re.compile(r"https?://(?:www\.)?(?:amazon\.in/\S*[?&]tag=|amzn\.to/|amzn\.in/|ekaro\.in/|earnkaro\.com/)", re.I)
+_AMZ = re.compile(r"https?://(?:www\.)?(?:amazon\.in|amzn\.to|amzn\.in)/", re.I)
+_SHORT = re.compile(r"https?://(?:www\.)?(?:bit\.ly|tinyurl\.com|cutt\.ly|t\.ly|rebrand\.ly|is\.gd|shorturl\.at|rb\.gy|tiny\.cc|"
+                    r"goo\.gl|ow\.ly|bl\.ink)/", re.I)
+_LABEL = re.compile(r"#ad\b|\bad\s*[·:|-]|\baffiliate\b|\bcollab\b|\bsponsored\b", re.I)
+_PRICE = re.compile(r"(?:₹|\brs\.?|\binr)\s?\d", re.I)
+_URGENT = re.compile(r"\blowest\b|\bonly\s+\d+\s+left\b|\bhurry\b|\blast chance\b|\bselling fast\b|\bprice error\b|"
+                     r"\bloot\b|\bgrab (?:it )?now\b|\bending soon\b", re.I)
+
+
+def _plain(raw):
+    return _html.unescape(re.sub(r"<[^>]+>", "", str(raw or "")))
+
+
+def post_check(text):
+    """→ list of problems with a public post ([] = it may go out). Works on the Telegram HTML that is about to be sent."""
+    raw = str(text or "")
+    plain = _plain(raw)
+    links = _LINK.findall(raw)
+    out = []
+    aff = [l for l in links if _AFF.match(l)]
+    if aff:
+        head = _plain(raw[:raw.find(aff[0])])
+        if not (_LABEL.search(head) or _LABEL.search(plain.split("\n", 1)[0])):
+            out.append("no '#ad' label before the first affiliate link (ASCI: upfront, not only at the end)")
+    if any(_AMZ.match(l) for l in links) and _PRICE.search(plain):
+        out.append(f"a price ('{_PRICE.search(plain).group(0)}…') in a post with Amazon links — Associates allows prices "
+                   "only from Amazon's API, time-stamped")
+    s = next((l for l in links if _SHORT.match(l)), None)
+    if s:
+        out.append(f"a link shortener ({s.split('/')[2]}) hides the destination — Associates forbids that; use the full link")
+    u = _URGENT.search(plain)
+    if u:
+        out.append(f"'{u.group(0)}' is an urgency or 'lowest' claim (CCPA dark patterns; ASCI needs proof)")
+    return out

@@ -130,6 +130,38 @@ Header renames are handled: quotes typed under an old column name are kept (a bu
 ## v1.10: product-page circuit breaker
 Amazon's captcha rate on product pages rose with each same-day run (0 → 5 → 18 of 30). After **3 captcha'd product pages in a row**, the fetcher stops requesting product pages for that run (`DETAIL_BLOCK_STREAK`), and the admin digest says so. Continuing would deepen the block and risk the list pages, which are the core data. **Run once a day; extra manual runs add no history** (history counts dates, not runs).
 
+## v1.81: what rivals have that we may legally copy, a gate before every public post, the calculator on 2026 fees (26 Nov)
+
+**Why.** Research across PriceHistory, BuyHatke, Keepa, DesiDime, CashKaro/EarnKaro, Helium 10, Jungle Scout and the
+Indian sourcing platforms (report: *OneZero feature gaps vs competitors*) found that most rival features are **price**
+features (history, drop alerts, "lowest ever", back-in-stock, cashback). Amazon's Associates policy forbids "price
+tracking and/or price alerting" without written approval, and Amazon now shows 365-day price history itself. What we can
+copy legally is rank-based: a watchlist, alternatives when a product fades, and free seller tools that lead to the audit.
+
+### What is new
+| Where | What it does |
+|---|---|
+| Bot `/watch <link>` · `/watching` · `/unwatch [all]` | Up to 20 products per chat. A 09:15 IST pass (new cron `45 3 * * *`) messages you only when one **starts slipping**, is **no longer on today's list**, **becomes a lasting bestseller** or **comes back**. Slipping or gone → 2 lasting products from the same list, with their "N of 14 days" basis. No prices, no stock or "deal" words. `#ad` in the first line whenever a link follows. A user who blocks the bot is forgotten; `/unwatch all` deletes everything. |
+| Bot `/margin <price> <cost> [kg] [LxBxH]` | Instant 2026 Easy Ship estimate: 0% referral under ₹1,000, closing fee by band (₹501–1,000 labelled ASSUMED), weight fee on chargeable weight, returns both ways, ex-GST. Agrees with `fees.py` to the paisa on 140 test cases. Dated and labelled an estimate. |
+| Bot `/sell <link>` | For sellers: days on the list (never "sales"), a *possible* certification match with the date and "verify on bis.gov.in", the weight fee from the title. Never says "no certification needed". Ends at `/margin` and `/pro`. |
+| Owner `/promo` | Cross-promo kit from the Operator: who to ask, the DM, the partner's post with our tracked `swap-1` / `swap-2` link and its joins so far, our "Collab" post, the rules (one partner per link, no Amazon images, no rewards, skip bought-member channels). |
+| **Outgoing-post gate** (`compliance.post_check`, inside `send_telegram`) | Every post to the public channel or a public group is checked first. Held, with the reason sent to you, if it has an affiliate link without `#ad` **before** it, a ₹ figure next to an Amazon link, a link shortener, or "lowest / only N left / hurry / loot"-type wording. Your own chat is never gated. The roundup and per-product posts now carry the label first. |
+| Calculator | Fee block in `CALC_ASSUMPTIONS` L2:N17 written from `fees.py`; referral 0% under ₹1,000; closing fee by band; "Weight kg (from title)" column feeds the Easy Ship weight fee; no indicative margin when the IndiaMART price is under 10% or over 100% of Amazon's ("check the unit"); no triage for NO-stock-gate rows. |
+| Signals and sheet | Rising searches must share a word with their seed; a falling product loses "Breakout launch / Sustained climber" (→ "Recent launch · 📉 falling"); IndiaMART estimates warn on unit mismatches; the old manual tabs are hidden **only** while they still hold template rows. |
+| Live Floor | To-do names the missing tracking IDs (`telegram`, `telegram.durable`, `whatsapp`). A 3-night member fall no longer tells you to cut posts: posting frequency is your call. |
+
+### Switch it on
+1. Deploy the Worker (`wrangler deploy`) — `wrangler.toml` now has the third cron. Nothing else to set for `/watch`, `/margin`, `/sell`.
+2. Optional variable `CHANNEL_HANDLE` (default `@onezerodeals`) — the name used in the cross-promo kit.
+3. Create the tracking IDs in Associates Central and add them to `AFF_TAGS`, or the money cannot be split by channel.
+
+### Verified / not verified (26 Nov 2026)
+Verified: Amazon.com Associates policy (14 Apr 2026) bans price tracking/alerting unless agreed; Telegram's "similar
+channels" use shared subscribers and list public channels only; Telegram enforces Stars for digital goods in bots from
+~18 Nov 2026; ASCI wants the label upfront. Not settled by any rule we found: whether a **rank**-only alert or stored
+bestseller-list history counts as restricted. The cheapest protection is a written question to Amazon.in Associates.
+Unresolved: the ≤₹300 closing fee (₹27 in the press, ₹20 on an Amazon seller blog) — it is one number in `fees.py`.
+
 ## v1.80: done-for-you sourcing & margin audits, published Easy Ship fees, a savings & cards funnel (22 Nov)
 
 **Why.** Keepa already shows Amazon.in sales-rank history, so rank history alone is not our edge. What Keepa cannot

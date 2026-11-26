@@ -572,7 +572,7 @@ def post_messages(picks_df, hist, tag, today, cat_names=None, week_label="", sty
         items.append((climb, p, f, cat_names.get(cat, cat)))
     items.sort(key=lambda x: x[0], reverse=True)
     if style == "single":
-        lines = [f"🔍 <b>{_h(POST_TITLE)}</b> — {_h(week_label)}", ""]
+        lines = [f"🔍 <b>{_h(POST_TITLE)}</b> — {_h(week_label)} · <i>#ad</i>", ""]     # v1.81: label upfront (ASCI)
         for i, (_, p, f, cname) in enumerate(items, 1):
             seas = str(p.get("seasonal", ""))
             tag_s = f" · 📅 {_h(seas.replace('SEASONAL: ', ''))}" if seas.startswith("SEASONAL") else ""
@@ -591,8 +591,8 @@ def post_messages(picks_df, hist, tag, today, cat_names=None, week_label="", sty
         seas_line = f"\n📅 Seasonal: {_h(seas.replace('SEASONAL: ', ''))}" if seas.startswith("SEASONAL") else ""
         link = _h(affiliate_link(p["asin"], _tag(tag, p)))
         # title and a button-style line are hyperlinks; no price (Associates rules: prices only via PA-API)
-        msgs.append(f"<a href=\"{link}\"><b>{_h(str(p['title'])[:110])}</b></a>\n\n{trend_line(f, _h(cname))}{seas_line}\n\n"
-                    f"👉 <a href=\"{link}\"><b>Check today's price on Amazon</b></a>\n\n<i>{SHORT_AD}</i>")
+        msgs.append(f"<i>{SHORT_AD}</i>\n<a href=\"{link}\"><b>{_h(str(p['title'])[:110])}</b></a>\n\n{trend_line(f, _h(cname))}{seas_line}\n\n"
+                    f"👉 <a href=\"{link}\"><b>Check today's price on Amazon</b></a>")     # v1.81: label first (ASCI)
     return msgs
 
 

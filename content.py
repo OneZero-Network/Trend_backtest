@@ -194,7 +194,7 @@ def roundup(signals, tag_fn, link_fn, cat_names, title, links=None, n=5, disclos
         rows.append(r)
         if len(rows) >= n:
             break
-    lines = [f"🏆 <b>{_h(title)}</b> — the products that stayed on Amazon India's bestseller lists all week", ""]
+    lines = [f"🏆 <b>{_h(title)}</b> — the products that stayed on Amazon India's bestseller lists all week · <i>#ad</i>", ""]
     for i, r in enumerate(rows, 1):
         cat = r.get("category_slug") or r.get("category")
         d, w = r.get("durable_days"), r.get("durable_window")

@@ -42,6 +42,7 @@ const JOBS = {
 };
 
 const MANUAL = ["operator.yml", "vendor.yml"];   // v1.70: started on demand (/refresh, /run), not by this cron
+export const ALERT_CRON = "45 3 * * *";          // v1.81: 09:15 IST, after the 07:45 fetch has pushed the new index
 
 export async function dispatch(env, workflow) {
   const url = `https://api.github.com/repos/${env.GH_OWNER}/${env.GH_REPO}/actions/workflows/${workflow}/dispatches`;
@@ -74,6 +75,11 @@ async function alert(env, msg) {
 
 export default {
   async scheduled(event, env, ctx) {
+    if (event.cron === ALERT_CRON) {
+      try { const n = await runAlerts(env); console.log(`watch alerts sent: ${n}`); }
+      catch (e) { await alert(env, `🔔 Watch alerts failed: ${e.message}`); }
+      return;
+    }
     const wf = JOBS[event.cron];
     if (!wf) { await alert(env, `⏰ Scheduler: unknown cron "${event.cron}" — check JOBS in worker.js`); return; }
     const res = await dispatch(env, wf);
@@ -177,7 +183,8 @@ export function describe(ix, asin, env) {
     new: `🆕 New on the ${cat} list at #${it.r}`,
     gone: `Last seen on the ${cat} list on ${esc(it.l)} · ${days}; not on it today`,
   };
-  return `<b>${esc(it.t || "Product " + asin)}</b>\n${lines[it.s] || lines.steady}\n<i>Observed on Amazon.in bestseller lists, updated daily (${esc(ix.date)}). Not a forecast.</i>\n\n${view}` + footer(env);
+  return `<b>${esc(it.t || "Product " + asin)}</b>\n${lines[it.s] || lines.steady}\n<i>Observed on Amazon.in bestseller lists, updated daily (${esc(ix.date)}). Not a forecast.</i>\n\n${view}` +
+    `\n🔔 /watch ${esc(asin)} — a message if it starts slipping or leaves the list` + footer(env);
 }
 
 export function topList(ix, query, env) {
@@ -200,7 +207,9 @@ export function topList(ix, query, env) {
 
 const HELP = "Send me any Amazon.in product link (or its ASIN) and I'll tell you what we saw on the bestseller lists: " +
   "how many of the last 14 days it was on the list, its rank now and a week ago, and whether it is climbing or slipping.\n\n" +
-  "/top — lasting bestsellers by category\n/pro — sellers: join the Radar waitlist\n\nObserved data only: no prices, no forecasts.";
+  "/top — lasting bestsellers by category\n/watch <link> — tell me when it starts slipping · /watching · /unwatch\n" +
+  "<b>Sellers</b>: /sell <link> — certification and weight hints · /margin <price> <supplier cost> [kg] — 2026 Amazon fees\n" +
+  "/pro — sellers: supplier quotes and margin audits\n\nObserved data only: no prices, no forecasts.";
 
 async function kvInc(env, key, ttl) {
   if (!env.RADAR_KV) return;
@@ -256,10 +265,22 @@ export async function reply(update, env, fetchFn = fetch) {
   let out, kind = "check";
   if (/^\/(start|help)\b/i.test(cmd)) { out = HELP; kind = "help"; }
   else if (/^\/top\b/i.test(cmd)) { out = topList(await loadIndex(env, fetchFn), arg, env); kind = "top"; }
+  else if (/^\/margin\b/i.test(cmd)) { out = marginReply(arg); kind = "margin"; }
+  else if (/^\/sell\b/i.test(cmd)) {
+    kind = "sell";
+    const a = await extractAsin(arg, fetchFn);
+    out = a ? sellReply(await loadIndex(env, fetchFn), a, env) : "Use: /sell <Amazon.in link or ASIN>";
+  }
+  else if (/^\/(watch|watching|unwatch)\b/i.test(cmd)) {
+    kind = "watch";
+    out = await watchCommand(cmd.toLowerCase().replace(/@.*/, ""), arg, msg.chat.id, env, fetchFn);
+  }
   else if (/^\/pro\b/i.test(cmd)) {
     kind = "pro";
-    out = "Thanks — you're on the Radar waitlist for sellers. We'll message you here to set it up; the Radar itself " +
-          "is sent by email. (We keep your Telegram username for this only. Nothing is sold or paid inside Telegram.)";
+    out = "Thanks — noted. For sellers we do two things: a weekly category Radar (what lasts, what is slipping) and a " +
+          "Sourcing & Margin Audit (3+ written supplier quotes and a landed Easy Ship margin sheet). We'll message you here; " +
+          "reports and invoices go by email. (We keep your Telegram username for this only. Nothing is sold or paid inside Telegram.)\n\n" +
+          "Free now: /sell <link> · /margin <price> <cost> <kg>";
     if (env.TG_CHAT_ID) {
       const who = msg.from && msg.from.username ? "@" + msg.from.username : (msg.from && msg.from.first_name) || "someone";
       await tgSend({ ...env, BOT_TOKEN: env.TG_BOT_TOKEN || env.BOT_TOKEN }, env.TG_CHAT_ID, `🧾 Radar waitlist: ${esc(who)} sent /pro`, fetchFn);
@@ -335,6 +356,7 @@ const OWNER_HELP = "🛠 <b>Owner desk</b>\n/floor — tonight's Live Floor repo
   "/quote A1 Supplier Name price=210 moq=100 gst=18 freight=1500 kg=0.45 dims=30x10x5 lead=7 written=yes\n" +
   "/audit hours A1 2 · /audit build A1 · /audit deliver A1 · /audits — open audits with RFQ text\n" +
   "/deal <EarnKaro link> <one line> · /card <link> <card name> | <one line> · /queue — what is waiting\n" +
+  "/promo — a cross-promo message for a partner channel, with its own tracked join link\n" +
   "Send the Associates tracking-ID report as a CSV file (dates in the caption)\n" +
   "/refresh — run the Operator now";
 const MAX_UPLOAD = 2 * 1024 * 1024;
@@ -377,7 +399,8 @@ export async function ownerDesk(msg, env, fetchFn = fetch) {
     const f = env.RADAR_KV && await env.RADAR_KV.get("push:floor");
     return f ? f.slice(0, 4000) : "No Live Floor report yet. It arrives after the 22:00 run, or now with /refresh.";
   }
-  for (const [rx, key, empty] of [[/^\/audits\b/i, "audits", "No open audits yet."],
+  for (const [rx, key, empty] of [[/^\/promo\b/i, "promo", "The cross-promo kit arrives with the next Operator run (/refresh)."],
+                                  [/^\/audits\b/i, "audits", "No open audits yet."],
                                   [/^\/queue\b/i, "queue", "Nothing queued. /deal <link> <line> adds a savings offer."]]) {
     if (rx.test(text)) {
       const f = env.RADAR_KV && await env.RADAR_KV.get(`push:${key}`);
@@ -431,7 +454,7 @@ async function handleEvents(u, env) {
 export async function pushJson(env, body) {
   if (!env.RADAR_KV) return { ok: false, why: "no KV" };
   const saved = [];
-  for (const key of ["floor", "leads", "ready", "audits", "queue"]) {
+  for (const key of ["floor", "leads", "ready", "audits", "queue", "promo"]) {
     if (typeof body[key] === "string") { await env.RADAR_KV.put(`push:${key}`, body[key].slice(0, 12000)); saved.push(key); }
   }
   return { ok: true, saved };
@@ -443,4 +466,206 @@ async function handlePush(request, u, env) {
   let body;
   try { body = await request.json(); } catch (e) { return new Response("bad json\n", { status: 400 }); }
   return new Response(JSON.stringify(await pushJson(env, body)), { headers: { "Content-Type": "application/json" } });
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// v1.81 SELLER TOOLS (/margin, /sell) — Amazon.in 2026 fees, mirrored from fees.py (test_v181 checks they agree)
+// ══════════════════════════════════════════════════════════════════════
+export const FEES = {
+  closing: [[300, 27], [500, 23], [1000, 45]], closingAbove: 75,       // highest published group; ₹501–1,000 ASSUMED
+  referralBelow1000: 0, referralAbove: 0.12,                            // 0% below ₹1,000 published; 12% above ASSUMED
+  gst: 0.18, rto: 0.08, target: 0.25,                                   // ASSUMED
+  ship: [55, 75, 112, 34, 18],                                          // Easy Ship weight fee, Standard STEP, 16 Mar 2026
+  asOf: "the fee table of 16 Mar 2026 (closing fees checked Nov 2026)",
+};
+
+export function chargeableKg(kg, dims) {
+  const vol = dims && dims.length === 3 ? dims[0] * dims[1] * dims[2] / 5000 : null;
+  const vals = [kg, vol].filter(v => typeof v === "number" && isFinite(v) && v > 0);
+  return vals.length ? Math.max(0.5, ...vals) : null;
+}
+
+export function shipFee(kg) {
+  if (kg == null) return null;
+  const [a, b, c, d, e] = FEES.ship;
+  if (kg <= 0.5) return a;
+  if (kg <= 1) return b;
+  if (kg <= 2) return c;
+  if (kg <= 5) return c + d * Math.ceil(kg - 2 - 1e-9);
+  return c + d * 3 + e * Math.ceil(kg - 5 - 1e-9);
+}
+
+export function closingFee(price) {
+  for (const [upTo, fee] of FEES.closing) if (price <= upTo) return fee;
+  return FEES.closingAbove;
+}
+
+export function marginCalc(price, cost = null, kg = null, dims = null) {
+  const priceEx = price / (1 + FEES.gst);
+  const ref = price < 1000 ? FEES.referralBelow1000 : FEES.referralAbove;
+  const clo = closingFee(price);
+  const fees = price * ref + clo;
+  const ck = chargeableKg(kg, dims);
+  const ship = shipFee(ck);
+  const mult = 1 + 2 * FEES.rto / (1 - FEES.rto);
+  const before = priceEx - fees;
+  const out = { price, priceEx, ref, clo, fees, ck, ship, mult };
+  out.maxCostBeforeShip = before - FEES.target * priceEx;
+  if (ship != null) out.maxCost = before - ship * mult - FEES.target * priceEx;
+  if (cost != null && ship != null) { out.profit = before - cost - ship * mult; out.margin = out.profit / priceEx; }
+  if (cost != null && ship == null) out.profitBeforeShip = before - cost;
+  return out;
+}
+
+function inr(x) { return "₹" + Math.round(x).toLocaleString("en-IN"); }
+
+export function parseMarginArgs(arg) {
+  const t = String(arg || "").replace(/₹|,/g, " ").trim().split(/\s+/).filter(Boolean);
+  const nums = t.filter(x => /^\d+(\.\d+)?$/.test(x)).map(Number);
+  const dimTok = t.find(x => /^\d+(\.\d+)?[x×*]\d+(\.\d+)?[x×*]\d+(\.\d+)?$/i.test(x));
+  const dims = dimTok ? dimTok.split(/[x×*]/i).map(Number) : null;
+  const kgTok = t.find(x => /^\d+(\.\d+)?kg$/i.test(x));
+  const kg = kgTok ? parseFloat(kgTok) : (nums.length >= 3 ? nums[2] : null);
+  return { price: nums[0] ?? null, cost: nums.length >= 2 ? nums[1] : null, kg, dims };
+}
+
+export function marginReply(arg) {
+  const { price, cost, kg, dims } = parseMarginArgs(arg);
+  if (!price || price < 10) return "Use: /margin <selling price ₹> <supplier cost ex-GST ₹> <kg> [LxBxH cm]\n" +
+    "e.g. /margin 549 180 0.4  or  /margin 999 300 1.2 30x20x10";
+  const m = marginCalc(price, cost, kg, dims);
+  const L = [`🧮 <b>${inr(price)} on Amazon.in, Easy Ship</b> — an estimate on ${FEES.asOf}`,
+    `Referral ${(m.ref * 100).toFixed(0)}% ${price < 1000 ? "(published: none below ₹1,000 in most categories)" : "(ASSUMED 12% — your category's rate may differ)"}`,
+    `Closing fee ${inr(m.clo)} ${price > 500 && price <= 1000 ? "(ASSUMED for ₹501–1,000)" : "(published, highest fee group)"}`,
+    m.ship != null ? `Weight fee ${inr(m.ship)} for ${m.ck} kg chargeable${dims ? " (volume counted)" : ""} (published, Standard STEP)`
+                   : "Weight fee: add the packed weight in kg (and LxBxH cm if it is bulky)"];
+  if (cost != null && m.margin != null) {
+    const v = m.margin >= FEES.target ? "✅ room" : m.margin >= 0.10 ? "⚠️ thin" : "❌ no";
+    L.push("", `At a supplier cost of ${inr(cost)}: <b>${inr(m.profit)} a unit, ${(m.margin * 100).toFixed(0)}% margin</b> — ${v}`);
+  } else if (cost != null) {
+    L.push("", `At a supplier cost of ${inr(cost)}: ${inr(m.profitBeforeShip)} a unit before the weight fee`);
+  } else if (m.maxCost != null) {
+    L.push("", m.maxCost > 0 ? `A supplier price under <b>${inr(m.maxCost)}</b> (ex-GST) keeps 25%` : "No supplier price keeps 25% at this weight");
+  } else {
+    L.push("", `Before the weight fee, a supplier price under <b>${inr(m.maxCostBeforeShip)}</b> keeps 25%`);
+  }
+  L.push("", `<i>Ex-GST: price ÷ 1.18, GST on Amazon's fees reclaimable, 8% returns costing shipping both ways (assumed). ` +
+    `Supplier cost = per unit, ex-GST, with packaging and inbound freight. Confirm in Seller Central's fee preview.</i>`,
+    "Want 3 written supplier quotes and a full margin sheet? /pro");
+  return L.join("\n");
+}
+
+export function sellReply(ix, asin, env) {
+  const it = ix.items && ix.items[asin];
+  if (!it) return `We have not seen ${esc(asin)} on the bestseller lists we track in the last ${ix.window || 14} days, so we cannot ` +
+    `show demand for it. /margin still works with your own numbers.`;
+  const cats = ix.cats || {};
+  const days = it.d === it.w ? `${it.d} days on the list` : `${it.d} of ${it.w} days on the list`;
+  const state = { durable: "🏆 lasting", climbing: "📈 climbing", falling: "📉 slipping" + (it.x ? ` (${esc(it.x)})` : ""),
+                  steady: "• steady", new: "🆕 new on the list", gone: "not on the list today" }[it.s] || it.s;
+  const L = [`🏪 <b>${esc(it.t || asin)}</b> — for sellers`,
+    `Demand: ${state} · #${it.r ?? "–"} in ${esc(cats[it.c] || it.c || "its category")} · ${days}`,
+    it.k ? `⚖ Possible certification match: ${esc(it.k)} — read from the title on ${esc(ix.date)}. Verify on bis.gov.in before you buy stock.`
+         : "⚖ No match in our certification list from the title. That is NOT a clearance — check bis.gov.in for your exact product.",
+    it.g ? `📦 The title says ${it.g} kg → Easy Ship weight fee about ${inr(shipFee(chargeableKg(it.g, null)))}. Weigh a packed sample: a bulky box is billed on volume.`
+         : "📦 No weight in the title — weigh a packed sample and use /margin with it.",
+    "", `Margin: /margin <your price> <supplier cost>${it.g ? " " + it.g : " <kg>"}`,
+    "Want 3 written supplier quotes and a landed margin sheet for it? /pro",
+    `\n<i>Observed on Amazon.in bestseller lists (${esc(ix.date)}). Rank is not sales.</i>`];
+  return L.join("\n");
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// v1.81 WATCHLIST — "tell me when it starts slipping". No prices, no stock claims: list movements only.
+// KV  w:<chatId> → [{a, s, r, t}]  (max 20; kept 400 days; /unwatch all deletes it)
+// ══════════════════════════════════════════════════════════════════════
+const MAX_WATCH = 20;
+const ON_LIST = new Set(["durable", "climbing", "falling", "steady", "new"]);
+
+export async function watchCommand(cmd, arg, chatId, env, fetchFn = fetch) {
+  if (!env.RADAR_KV) return "Watching needs the bot's storage, which is not set up yet.";
+  const key = `w:${chatId}`;
+  const list = JSON.parse((await env.RADAR_KV.get(key)) || "[]");
+  if (cmd === "/watching") {
+    if (!list.length) return "You are not watching anything. Send /watch <Amazon.in link>.";
+    return "🔔 <b>Watching</b>\n" + list.map(w => `• ${esc(w.t || w.a)} — ${esc(w.s)} · /unwatch ${esc(w.a)}`).join("\n");
+  }
+  if (cmd === "/unwatch") {
+    if (/^all$/i.test(arg.trim())) { await env.RADAR_KV.delete(key); return "Stopped watching everything. Nothing of yours is kept."; }
+    const a = await extractAsin(arg, fetchFn);
+    const left = list.filter(w => w.a !== a);
+    if (left.length === list.length) return "That product is not on your list. /watching shows it.";
+    left.length ? await env.RADAR_KV.put(key, JSON.stringify(left), { expirationTtl: 400 * 86400 }) : await env.RADAR_KV.delete(key);
+    return `Stopped watching ${esc(a)}.`;
+  }
+  const a = await extractAsin(arg, fetchFn);
+  if (!a) return "Use: /watch <Amazon.in product link or ASIN>";
+  if (list.some(w => w.a === a)) return "Already watching it. /watching shows your list.";
+  if (list.length >= MAX_WATCH) return `You can watch up to ${MAX_WATCH} products. /unwatch one first.`;
+  const ix = await loadIndex(env, fetchFn);
+  const it = (ix.items || {})[a];
+  list.push({ a, s: it ? it.s : "unseen", r: it ? it.r : null, t: it ? it.t : "", c: it ? it.c : "" });
+  await env.RADAR_KV.put(key, JSON.stringify(list), { expirationTtl: 400 * 86400 });
+  return `🔔 Watching ${esc(it ? it.t : a)}. I'll message you if it starts slipping, leaves the bestseller list, ` +
+    `becomes a lasting bestseller or comes back.\n<i>We keep your chat id and this list only to send these messages; ` +
+    `/unwatch all deletes them.</i>`;
+}
+
+export function watchChange(w, it) {
+  // → one line for a change worth a message, or "" (climbing ↔ steady noise is not)
+  const now = it ? it.s : "gone";
+  const was = w.s;
+  if (now === was) return "";
+  const name = `<b>${esc((it && it.t) || w.t || w.a)}</b>`;
+  if (now === "falling") return `📉 ${name} started slipping` + (it.x ? `: ${esc(it.x)}` : it.r ? `, now #${it.r}` : "");
+  if (now === "gone" && ON_LIST.has(was)) return `⚪ ${name} is no longer on today's bestseller list`;   // a fact, not a stock claim
+  if (now === "durable" && was !== "durable") return `🏆 ${name} is now a lasting bestseller (${it.d} of ${it.w} days)`;
+  if (ON_LIST.has(now) && (was === "gone" || was === "unseen")) return `🆕 ${name} is on the bestseller list at #${it.r}`;
+  return "";
+}
+
+function alternatives(ix, it, skip, env) {
+  const cat = it && it.c;
+  const alts = ((ix.top || {})[cat] || []).filter(a => a !== skip).slice(0, 2);
+  return alts.map(a => { const x = ix.items[a] || {};
+    return `   ↳ lasting in the same list: <a href="${esc(link(env, a))}">${esc(x.t || a)}</a> (${x.d} of ${x.w} days on the list)`; });
+}
+
+export async function runAlerts(env, fetchFn = fetch) {
+  if (!env.RADAR_KV) return 0;
+  _resetIndex();
+  const ix = await loadIndex(env, fetchFn);
+  let sent = 0, cursor;
+  do {
+    const page = await env.RADAR_KV.list({ prefix: "w:", cursor });
+    for (const k of page.keys) {
+      const list = JSON.parse((await env.RADAR_KV.get(k.name)) || "[]");
+      const lines = [];
+      let changed = false;
+      for (const w of list) {
+        const it = (ix.items || {})[w.a];
+        const line = watchChange(w, it);
+        if (line) {
+          lines.push(line);
+          if (!it || it.s === "falling") lines.push(...alternatives(ix, it || { c: w.c }, w.a, env));
+        }
+        const s = it ? it.s : "gone";
+        if (s !== w.s || (it && it.r !== w.r) || (it && it.c && w.c !== it.c)) {
+          w.s = s; w.r = it ? it.r : null; if (it) { w.t = it.t; w.c = it.c; } changed = true;
+        }
+      }
+      if (lines.length) {
+        const ad = lines.some(l => l.includes("<a href")) ? " · <i>#ad: links below are affiliate links</i>" : "";
+        const text = `🔔 <b>Your watched products</b> (${esc(ix.date)})${ad}\n\n${lines.join("\n")}\n\n` +
+          `<i>Bestseller-list movements only: no prices, no forecasts. /watching · /unwatch</i>` + footer(env);
+        const r = await tgSend(env, k.name.slice(2), text, fetchFn);
+        if (r && r.status === 403) { await env.RADAR_KV.delete(k.name); continue; }   // they blocked the bot: forget the list
+        sent++;
+        if (sent % 25 === 0) await new Promise(res => setTimeout(res, 1100));        // Telegram: ~30 messages a second
+      }
+      if (changed) await env.RADAR_KV.put(k.name, JSON.stringify(list), { expirationTtl: 400 * 86400 });
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return sent;
 }

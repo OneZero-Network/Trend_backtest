@@ -270,3 +270,44 @@ def review(ledger, today, assoc, inputs, goal=GOAL_INR):
     lines += ["", f"🎯 Goal ₹{goal:,.0f}/month needs about {need:,.0f} members ({basis})."
               + (f" Now: {int(m_now):,}." if m_now else "") + eta if need else "🎯 Goal: not enough data."]
     return rows, lines
+
+
+# ══════════════════════════════════════════════════════════════════════
+# v1.81 CROSS-PROMO KIT — Telegram's "Similar channels" list is built from shared subscribers and shows public channels
+# only, so swaps with similar-sized channels are the free lever. One partner per tracked link (swap-1, swap-2) at a time.
+# ══════════════════════════════════════════════════════════════════════
+SWAP_LINKS = ("swap-1", "swap-2")
+
+
+def promo_kit(links, ledger, handle="", title="Amazon Hidden Bestsellers", esc=lambda s: s):
+    """→ owner text: who to ask, the DM, the post for the partner (with our tracked link), our post for them, results."""
+    mem = series(ledger, "members", "telegram") if ledger is not None and not ledger.empty else pd.Series(dtype=float)
+    n = int(_num(mem.iloc[-1]) or 0) if len(mem) else 0
+    who = esc(handle) if handle else "our channel"
+    L = ["🤝 <b>Cross-promo kit</b>",
+         f"<b>Who to ask</b>: public Indian channels about shopping, gadgets, home or students with about {max(n, 50)}–"
+         f"{max(5 * n, 500)} members (similar size accepts; 100× bigger rarely does). Not loot/price-error channels: "
+         "their readers want speed, ours want products that last. Find them under <i>Similar channels</i> on a channel like ours, or on tgstat.com.",
+         "", "<b>1 · Message to the admin</b> (copy):",
+         f"<code>Hi! I run {who}{f' ({n} members)' if n else ''}: short posts of Amazon.in bestsellers that have "
+         "stayed on the list for 2+ weeks, plus a warning when one starts slipping. No loot spam. Would you swap a shout-out? "
+         "I post yours and you post ours on the same day at 7 PM. Text is ready below; edit freely.</code>"]
+    free = [k for k in SWAP_LINKS if links.get(k)]
+    if not free:
+        L += ["", "⚠️ No swap links yet — they are created by the growth run (the bot must be a channel admin with "
+                  "'Invite users via link')."]
+    for k in free:
+        joins = total(ledger, "joins", k, since="") if ledger is not None and not ledger.empty else 0
+        L += ["", f"<b>2 · Their post about us</b> — partner on <b>{k}</b> (joins so far: {int(joins)}):",
+              f"<code>🔍 Shop on Amazon? {who} posts the bestsellers that LAST — 2+ weeks on the list, not one-day spikes — "
+              f"and says when one starts slipping. Free: {esc(links[k])}</code>"]
+    L += ["", "<b>3 · Our post about them</b> (same day, 7 PM):",
+          "<code>🤝 Collab (channel swap): &lt;name&gt; — &lt;one line on what they post&gt;. Join: &lt;their link&gt;</code>",
+          "", "<b>Rules</b>: one partner per link at a time, so joins are counted by partner. Label it 'Collab' — a shout-out "
+          "in exchange is a material connection (ASCI). Your own graphics only: no Amazon product images or logos. No reward "
+          "for clicking or joining. Skip channels whose members jumped overnight (bought members). "
+          "Judge each partner by joins per 100 of their members after 7 days and "
+          "repeat only the best. A joint giveaway (Premium gift codes, India only, new members) is the bigger lever; "
+          "expect churn after the draw and measure who stays.",
+          "<i>Never pay for members: fake members also corrupt the shared-subscriber signal Similar channels uses.</i>"]
+    return "\n".join(L)

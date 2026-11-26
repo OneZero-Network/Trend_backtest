@@ -44,7 +44,8 @@ COLS = [  # (key, header, kind)  kind: info=refreshed by fetcher · input=yours 
     ("search_words", "IndiaMART search words (optional override)", "input"),
     ("sourcing", "Sourcing cost ex-GST (₹) — best logged quote (or type one)", "default"),
     ("purchase_gst", "Purchase GST %", "default"), ("defect", "Defect %", "default"),
-    ("moq", "MOQ (units)", "input"), ("ship", "Shipping per order (₹)", "default"),
+    ("moq", "MOQ (units)", "input"), ("weight", "Weight kg (from title)", "info"),
+    ("ship", "Shipping / Easy Ship weight fee (₹)", "default"),
     ("referral", "Referral fee %", "default"), ("closing", "Closing fee (₹)", "default"),
     ("rto", "RTO %", "default"), ("ads", "Ads/PPC per unit (₹)", "default"),
     ("sale_gst", "Sale GST %", "default"),
@@ -85,7 +86,8 @@ TH_ROW = {"min_margin": 3, "min_roi": 4, "itc": 5, "ret_mult": 6}
 CAT_HEADER_ROW = 9
 CAT_COLS = ["Category slug", "Referral fee %", "Closing fee (₹)", "Shipping per order (₹)", "RTO %",
             "Ads % of price", "Sale GST %", "Purchase GST %", "Defect %", "Source / note"]
-_PH = "PLACEHOLDER — replace with Amazon Seller Central fee schedule & your courier rates"
+_PH = ("ASSUMED — B = referral at ₹1,000+ (0% below), D = shipping when the title has no weight. Closing and Easy Ship "
+       "fees come from the 2026 block in L:N")
 CAT_DEFAULTS = [  # placeholders, deliberately round numbers: NOT Amazon's actual fees
     ("default", 0.10, 30, 60, 0.10, 0.08, 0.18, 0.18, 0.03, _PH),
     ("electronics", 0.08, 30, 60, 0.08, 0.08, 0.18, 0.18, 0.03, _PH),
@@ -98,6 +100,38 @@ CAT_FIRST = CAT_HEADER_ROW + 1
 CAT_LAST = CAT_FIRST + 40          # room for you to add categories
 DEF_COL = {"referral": "B", "closing": "C", "ship": "D", "rto": "E", "ads_pct": "F",
            "sale_gst": "G", "purchase_gst": "H", "defect": "I"}
+
+
+# v1.81: Amazon.in 2026 fees live in their own block (columns L:N), written into old tabs too (it never touches A:J,
+# which stay yours). Values come from fees.py so the sheet and the code cannot disagree.
+FEE_COL, FEE_VAL = "L", "M"
+FEE_TITLE = "Amazon.in fees used by the calculator (v1.81)"
+
+
+def fee_block():
+    import fees
+    c = fees.DEFAULTS
+    a, b, cc, d, e = fees.SHIP_TABLE["easy_ship"]
+    return [[FEE_TITLE, "", ""],
+            ["Closing fee: price up to (₹)", "Fee (₹)", "Source"],
+            [300, c["closing_0_300"], "published, highest fee group (after the 7 Sep 2026 rise)"],
+            [500, c["closing_301_500"], "published, highest fee group"],
+            [1000, c["closing_501_1000"], "ASSUMED — not in the published table; check the fee preview"],
+            ["above", c["closing_above_1000"], "published ('*' categories)"],
+            ["", "", ""],
+            ["Easy Ship weight fee: weight up to (kg)", "Fee (₹)", fees.SHIP_BASIS],
+            [0.5, a, ""], [1, b, ""], [2, cc, ""],
+            ["per extra kg, 2–5 kg", d, ""], ["per extra kg, above 5 kg", e, ""],
+            ["", "", ""],
+            ["Referral fee", "", "0% below ₹1,000 (16 Mar 2026, 1,800+ categories). Column B above = your category's "
+                                 "rate at ₹1,000 and up. Column C (closing) is no longer used: the bands above are."],
+            ["Shipping", "", "With a weight in the title: Easy Ship weight fee (higher of actual and volumetric "
+                             "weight decides — weigh a sample). Without: column D above."]]
+
+
+FEE_FIRST_ROW = 2                                     # block starts at L2
+_FR = lambda i: f"{A}${FEE_VAL}${FEE_FIRST_ROW + i}"   # value cell of block row i (0-based)
+_FL = lambda i: f"{A}${FEE_COL}${FEE_FIRST_ROW + i}"   # label/threshold cell
 
 
 def _lookup(key, r):
@@ -114,6 +148,15 @@ def default_formula(key, r):
         return workbook_tabs.best_quote_formula(f"$A{r}")
     if key == "ads":
         return f"=${L['price']}{r}*{_lookup('ads_pct', r)}"
+    p, w = f"${L['price']}{r}", f"${L['weight']}{r}"
+    if key == "referral":                       # v1.81: 0% below ₹1,000 (16 Mar 2026)
+        return f"=IF({p}<1000,0,{_lookup('referral', r)})"
+    if key == "closing":                        # v1.81: by price band, from the fee block
+        return f"=IF({p}<={_FL(2)},{_FR(2)},IF({p}<={_FL(3)},{_FR(3)},IF({p}<={_FL(4)},{_FR(4)},{_FR(5)})))"
+    if key == "ship":                           # v1.81: Easy Ship weight fee when the title gives a weight
+        fee = (f"IF({w}<={_FL(8)},{_FR(8)},IF({w}<={_FL(9)},{_FR(9)},IF({w}<={_FL(10)},{_FR(10)},"
+               f"IF({w}<=5,{_FR(10)}+{_FR(11)}*ROUNDUP({w}-2,0),{_FR(10)}+3*{_FR(11)}+{_FR(12)}*ROUNDUP({w}-5,0)))))")
+        return f"=IF(ISNUMBER({w}),{fee},{_lookup('ship', r)})"
     return "=" + _lookup(key, r)
 
 
@@ -133,13 +176,16 @@ def calc_formula(key, r):
         "roi": f'=IF({blank},"",{c["profit"]}/({c["sourcing"]}*(1+{c["purchase_gst"]})))',
         "cash": f'=IF(OR({blank},{c["moq"]}=""),"",{c["moq"]}*{c["sourcing"]}*(1+{c["purchase_gst"]}))',
         # indicative margin: same cost model with the IndiaMART median in place of your quote
-        "est_margin": (f'=IF(OR(NOT(ISNUMBER({c["ind_cost"]})),{c["price"]}=0),"",'
+        "est_margin": (f'=IF(OR(NOT(ISNUMBER({c["ind_cost"]})),{c["price"]}=0,{c["ind_cost"]}<0.1*{c["price"]},{c["ind_cost"]}>{c["price"]}),"",'
                        f'({c["price"]}-({c["ind_cost"]}/(1-{c["defect"]})+{c["fees"]}'
                        f'+{c["price"]}*{c["sale_gst"]}/(1+{c["sale_gst"]})-{th["itc"]}*{c["ind_cost"]}/(1-{c["defect"]})*{c["purchase_gst"]}'
                        f'+{c["ship"]}+{c["rto_cost"]}+{c["ads"]}))/{c["price"]})'),
-        "est_verdict": (f'=IF({c["est_margin"]}="","",IF({c["est_margin"]}>={th["min_margin"]},'
+        "est_verdict": (f'=IF(ISNUMBER(SEARCH("NO —",{c["stock_gate"]})),"",'          # v1.81: brand / formulated / fading → no triage
+                        f'IF(AND(ISNUMBER({c["ind_cost"]}),{c["price"]}>0,OR({c["ind_cost"]}<0.1*{c["price"]},{c["ind_cost"]}>{c["price"]})),'
+                        f'"Check the unit (per kg / dozen / carton?) or that it is the same product",'
+                        f'IF({c["est_margin"]}="","",IF({c["est_margin"]}>={th["min_margin"]},'
                         f'"Worth requesting a quote ("&{c["ind_conf"]}&" confidence)",'
-                        f'"Likely not viable at listed prices"))'),
+                        f'"Likely not viable at listed prices"))))'),
         "decision": (f'=IF(AND({c["stock_gate"]}<>"",ISERROR(SEARCH("STOCK-READY",{c["stock_gate"]}))),'
                      f'"WAIT — "&{c["stock_gate"]},'
                      f'IF(ISNUMBER(SEARCH("Quarantined",{c["signal"]})),"HOLD — price-dip quarantine",'
@@ -157,7 +203,10 @@ _DEFAULT_RX = re.compile(r"^=\s*(\$?[A-Z]+\$?\d+\s*\*\s*)?IFERROR\((INDEX|SUMIFS
 
 
 def _is_default_formula(v):
-    return isinstance(v, str) and bool(_DEFAULT_RX.match(v))
+    """Our generated defaults read CALC_ASSUMPTIONS or SUPPLIER_QUOTES; a number (or your own formula) is yours."""
+    if not isinstance(v, str) or not v.startswith("="):
+        return False
+    return bool(_DEFAULT_RX.match(v)) or ASSUMP_TAB in v or "SUPPLIER_QUOTES" in v
 
 
 def has_quote(r, quoted_asins=()):
@@ -181,6 +230,12 @@ def assumptions_values():
 IND_KEYS = ("ind_cost", "ind_range", "ind_matches", "ind_conf", "ind_url")
 
 
+def _weight(title):
+    import fees
+    w = fees.weight_kg(title)
+    return w if w is not None else ""
+
+
 def _row_from_signal(sig, today):
     g = lambda k: sig.get(k) if sig.get(k) is not None else ""
     if sig.get("_sourcing_update"):                      # sourcing run: only touch indicative columns
@@ -189,7 +244,7 @@ def _row_from_signal(sig, today):
             "trend_score": g("trend_score"), "signal": g("signal"), "price": g("price_inr"),
             "sellers": g("seller_offers"), "bought": g("bought_past_month_min"),
             "compliance": g("compliance"), "seasonal": g("seasonal"), "stock_gate": g("stock_gate"), "competition": g("competition"),
-            "url": g("url"),
+            "url": g("url"), "weight": _weight(g("title")),
             "last_seen": today}
 
 
@@ -266,6 +321,7 @@ def render(rows):
 # Previous header names → key. A renamed header must never orphan data you typed under the old name.
 HEADER_ALIASES = {
     "Sourcing cost ex-GST (₹) — IndiaMART quote": "sourcing",
+    "Shipping per order (₹)": "ship",                    # v1.81 rename
 }
 
 
@@ -358,6 +414,7 @@ def write_xlsx(path, rows, keep_sheets_from=None):
         wa = wb.create_sheet(ASSUMP_TAB)
         for line in assumptions_values():
             wa.append(line)
+    _ensure_fee_block_xlsx(wb[ASSUMP_TAB])
     if CALC_TAB in wb.sheetnames:
         del wb[CALC_TAB]
     ws = wb.create_sheet(CALC_TAB, 0)
@@ -365,6 +422,22 @@ def write_xlsx(path, rows, keep_sheets_from=None):
         ws.append(line)
     _style_xlsx(wb)
     wb.save(path)
+
+
+def _ensure_fee_block_xlsx(wa):
+    """Write / refresh the fee block in L:N. Columns A:J (yours) are never touched."""
+    for i, row in enumerate(fee_block()):
+        for j, v in enumerate(row):
+            wa.cell(row=FEE_FIRST_ROW + i, column=12 + j, value=v if v != "" else None)
+
+
+def _ensure_fee_block_gsheet(wa):
+    try:
+        if getattr(wa, "col_count", 16) < 14:
+            wa.resize(cols=16)
+        wa.update(range_name=f"{FEE_COL}{FEE_FIRST_ROW}", values=fee_block(), value_input_option="USER_ENTERED")
+    except Exception:
+        pass                                     # the calculator still writes; formulas show 0 fees until the next run
 
 
 def read_xlsx(path):
@@ -389,10 +462,11 @@ def update_gsheet(wb, signals, today=None, refresh=None):
     import workbook_tabs
     workbook_tabs.ensure_gsheet(wb)
     try:
-        wb.worksheet(ASSUMP_TAB)
+        wa = wb.worksheet(ASSUMP_TAB)
     except gspread.WorksheetNotFound:
-        wa = wb.add_worksheet(title=ASSUMP_TAB, rows=CAT_LAST + 5, cols=12)
+        wa = wb.add_worksheet(title=ASSUMP_TAB, rows=CAT_LAST + 5, cols=16)
         wa.update(range_name="A1", values=assumptions_values(), value_input_option="USER_ENTERED")
+    _ensure_fee_block_gsheet(wa)
     try:
         ws = wb.worksheet(CALC_TAB)
         existing = parse(ws.get_all_values(value_render_option="FORMULA"))

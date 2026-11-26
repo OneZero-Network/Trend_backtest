@@ -1,5 +1,6 @@
 // node test_worker.mjs — v1.60 shopper bot + join counter, with Telegram, GitHub and KV mocked.
-import worker, { extractAsin, describe, topList, reply, statsJson, istDate, _resetIndex, isOwner, ownerDesk, eventsJson, pushJson } from "./worker.js";
+import worker, { extractAsin, describe, topList, reply, statsJson, istDate, _resetIndex, isOwner, ownerDesk, eventsJson, pushJson,
+  marginCalc, marginReply, parseMarginArgs, sellReply, shipFee, watchCommand, watchChange, runAlerts, ALERT_CRON } from "./worker.js";
 
 let fails = 0;
 const check = (name, ok, info = "") => { console.log((ok ? "PASS " : "FAIL ") + name + (ok ? "" : "  " + JSON.stringify(info).slice(0, 400))); if (!ok) fails++; };
@@ -19,7 +20,7 @@ const env0 = { GH_OWNER: "o", GH_REPO: "r", GH_TOKEN: "t", AFF_TAG_BOT: "ozbot-2
 
 function kv() {
   const m = new Map();
-  return { m, async get(k) { return m.has(k) ? m.get(k) : null; }, async put(k, v) { m.set(k, String(v)); },
+  return { m, async get(k) { return m.has(k) ? m.get(k) : null; }, async put(k, v) { m.set(k, String(v)); }, async delete(k) { m.delete(k); },
     async list({ prefix }) { return { keys: [...m.keys()].filter(k => k.startsWith(prefix)).map(name => ({ name })), list_complete: true }; } };
 }
 const sent = [];
@@ -133,7 +134,7 @@ globalThis.fetch = fakeFetch;
 check("/refresh starts operator.yml on GitHub", rf.text.includes("Running the Operator") && dispatched && dispatched.includes("operator.yml"), [rf, dispatched]);
 const runOp = await worker.fetch(new Request("https://w.dev/run?wf=nope.yml&key=k"), envO);
 check("/run still refuses unknown workflows", runOp.status === 400);
-check("/pro no longer promises a sale inside Telegram", (await reply({ message: { chat: { id: 6, type: "private" }, from: { id: 78 }, text: "/pro" } }, envO, fakeFetch)).text.includes("Nothing is sold or paid inside Telegram"));
+check("/pro names both seller products and the free tools, still nothing sold in Telegram", (await reply({ message: { chat: { id: 6, type: "private" }, from: { id: 78 }, text: "/pro" } }, envO, fakeFetch)).text.includes("Nothing is sold or paid inside Telegram"));
 
 // ── v1.80 audits and savings from the owner desk ────────────────────────
 const nBefore = [...envO.RADAR_KV.m.keys()].filter(k => k.startsWith("ev:")).length;
@@ -148,6 +149,86 @@ check("/audits and /queue answer from what the Operator pushed (not queued)", (a
   && (await reply(om("/queue"), envO, fakeFetch)).text.includes("Waiting") && [...envO.RADAR_KV.m.keys()].filter(k => k.startsWith("ev:")).length === nBefore + 4);
 const strangerDeal = await reply({ message: { chat: { id: 5, type: "private" }, from: { id: 5 }, text: "/deal https://ekaro.in/x spam" } }, envO, fakeFetch);
 check("a stranger cannot queue a deal", !strangerDeal.text.includes("Queued"));
+
+
+// ── v1.81 seller tools ──────────────────────────────────────────────────
+check("/margin parses price, cost, kg and LxBxH", JSON.stringify(parseMarginArgs("₹549 180 0.4")) === JSON.stringify({ price: 549, cost: 180, kg: 0.4, dims: null })
+  && parseMarginArgs("999 300 1.2kg 30x20x10").kg === 1.2 && parseMarginArgs("999 300 1.2kg 30x20x10").dims.join() === "30,20,10");
+const mr = marginReply("549 180 0.4");
+check("/margin: 0% referral below ₹1,000, ₹45 closing labelled ASSUMED, ₹55 weight fee, a margin and a verdict",
+  mr.includes("Referral 0%") && mr.includes("₹45") && mr.includes("ASSUMED for ₹501–1,000") && mr.includes("₹55 for 0.5 kg") && /\d+% margin/.test(mr), mr);
+check("/margin without a cost gives the most a supplier can charge", marginReply("549").includes("Before the weight fee, a supplier price under")
+  && marginReply("549 x 0.4").includes("keeps 25%") || marginReply("549").includes("keeps 25%"));
+check("/margin with a bulky box bills volume (30×20×10 = 1.2 kg → ₹112)", marginReply("999 300 0.3 30x20x10").includes("₹112 for 1.2 kg chargeable (volume counted)"));
+check("/margin with no numbers explains the format", marginReply("").startsWith("Use: /margin"));
+check("weight fee bands: ₹55/75/112, +₹34/kg to 5 kg, +₹18/kg after", [0.4, 0.9, 1.8, 3.5, 5, 6.2].map(shipFee).join() === "55,75,112,180,214,250");
+const ixs = { ...IX, items: { ...IX.items, B0TOY00001: { t: "Kids Toy Car", c: "kitchen", r: 7, d: 12, w: 14, s: "steady", k: "BIS (toys QCO)", g: 1.5 } } };
+const sr = sellReply(ixs, "B0TOY00001", env0);
+check("/sell: demand line, certification flag, weight fee from the title, margin and audit prompts",
+  sr.includes("#7") && sr.includes("12 of 14 days") && sr.includes("Possible certification match: BIS (toys QCO)") && sr.includes("bis.gov.in") && sr.includes("₹112") && sr.includes("/margin <your price> <supplier cost> 1.5") && sr.includes("/pro"), sr);
+check("/sell for an unseen product does not invent demand", sellReply(IX, "B0NOTSEEN1", env0).includes("cannot show demand"));
+check("/sell never says no certification is needed", sellReply({ ...IX, items: { ...IX.items, B0PLAIN001: { t: "Mug", c: "kitchen", r: 4, d: 14, w: 14, s: "durable" } } }, "B0PLAIN001", env0).includes("NOT a clearance"));
+check("/margin is dated and labelled an estimate", mr.includes("an estimate on the fee table of 16 Mar 2026"));
+check("/sell never shows a price", !/₹\d/.test(sr.replace(/₹112/, "")), sr);
+
+// ── v1.81 watchlist ─────────────────────────────────────────────────────
+const envW = { ...env0, RADAR_KV: kv() };
+_resetIndex();
+const w1 = await watchCommand("/watch", "https://www.amazon.in/dp/B0CLIMB001", 55, envW, fakeFetch);
+check("/watch stores the product with today's state and says what we keep", w1.includes("Watching Foam Roller") && w1.includes("/unwatch all deletes")
+  && JSON.parse(envW.RADAR_KV.m.get("w:55"))[0].s === "climbing", w1);
+await watchCommand("/watch", "B09W5PSTBP", 55, envW, fakeFetch);
+await watchCommand("/watch", "B0FALL0003", 55, envW, fakeFetch);
+check("/watch twice is refused politely", (await watchCommand("/watch", "B0CLIMB001", 55, envW, fakeFetch)).includes("Already watching"));
+check("/watching lists them", (await watchCommand("/watching", "", 55, envW, fakeFetch)).split("•").length === 4);
+check("/watch without a link explains", (await watchCommand("/watch", "", 55, envW, fakeFetch)).startsWith("Use: /watch"));
+check("climbing → steady is not worth a message; → falling, → gone, → durable, comeback are",
+  watchChange({ s: "climbing" }, { s: "steady" }) === "" && watchChange({ s: "climbing", t: "A" }, { s: "falling", t: "A", r: 30 }).includes("started slipping")
+  && watchChange({ s: "steady", t: "A" }, undefined).includes("no longer on today's bestseller list") && watchChange({ s: "climbing" }, { s: "durable", t: "A", d: 14, w: 14 }).includes("lasting")
+  && watchChange({ s: "gone", t: "A" }, { s: "new", t: "A", r: 40 }).includes("#40"));
+// next day: the foam roller falls, the mug leaves the list
+const IX2 = JSON.parse(JSON.stringify(IX)); IX2.date = "2026-11-22";
+IX2.items.B0CLIMB001 = { ...IX.items.B0CLIMB001, s: "falling", r: 60, x: "fell #12 → #60 in 3 days" };
+IX2.items.B0SPORT002 = { t: "Yoga Mat", c: "sports", r: 3, d: 14, w: 14, s: "durable" }; IX2.top.sports = ["B09W5PSTBP", "B0SPORT002"];
+delete IX2.items.B0FALL0003;
+const sentW = [];
+const fetch2 = async (url, opts = {}) => {
+  url = String(url);
+  if (url.includes("api.github.com")) return { status: 200, json: async () => IX2 };
+  if (url.includes("api.telegram.org")) { sentW.push(JSON.parse(opts.body)); return { status: 200, json: async () => ({ ok: true }) }; }
+  return fakeFetch(url, opts);
+};
+const nA = await runAlerts(envW, fetch2);
+const al = sentW[0] ? sentW[0].text : "";
+check("one alert message for the chat, with the slip and the exit", nA === 1 && sentW.length === 1 && sentW[0].chat_id === "55"
+  && al.includes("Foam Roller</b> started slipping: fell #12 → #60") && al.includes("Mug</b> is no longer on today's bestseller list") && al.split("\n")[0].includes("#ad"), [nA, al]);
+check("a slipping product comes with lasting alternatives from the same list (tagged, with their basis)", al.includes("Yoga Mat") && al.includes("tag=ozbot-21") && al.includes("(14 of 14 days on the list)")
+  && !al.includes(">Foam Roller</a>"), al);
+check("the unchanged durable product gets no status line (only as an alternative); no prices; disclosure", !al.includes("Dumbbells Pack of 2</b>") && !/₹/.test(al) && al.includes("As an Amazon Associate"));
+check("state saved, so the same change is not sent twice", (await runAlerts(envW, fetch2)) === 0 && sentW.length === 1);
+const block = { ...envW };
+const fetch403 = async (url, opts = {}) => String(url).includes("api.telegram.org") ? { status: 403, json: async () => ({ ok: false }) } : fetch2(url, opts);
+IX2.items.B09W5PSTBP = { ...IX2.items.B09W5PSTBP, s: "falling", r: 90 };
+await runAlerts(block, fetch403);
+check("a user who blocked the bot is forgotten", !envW.RADAR_KV.m.has("w:55"));
+check("/unwatch all deletes everything", await (async () => { await watchCommand("/watch", "B09W5PSTBP", 56, envW, fetch2);
+  const t = await watchCommand("/unwatch", "all", 56, envW, fetch2); return t.includes("Nothing of yours is kept") && !envW.RADAR_KV.m.has("w:56"); })());
+const rw = await reply({ message: { chat: { id: 57, type: "private" }, from: { id: 57 }, text: "/watch@OneZeroDeals_bot B09W5PSTBP" } }, envW, fetch2);
+check("/watch@botname works through reply()", rw.text.includes("Watching"), rw);
+check("the product answer offers /watch", describe(IX, "B09W5PSTBP", env0).includes("/watch B09W5PSTBP"));
+check("help lists the new commands", (await reply({ message: { chat: { id: 58, type: "private" }, from: { id: 58 }, text: "/help" } }, envW, fetch2)).text.includes("/margin"));
+let ranAlerts = 0;
+const envS = { ...envW, RADAR_KV: { ...kv(), list: async () => { ranAlerts++; return { keys: [], list_complete: true }; } } };
+globalThis.fetch = fetch2;
+await worker.scheduled({ cron: ALERT_CRON }, envS, { waitUntil() {} });
+globalThis.fetch = fakeFetch;
+check("the 09:15 IST cron runs the alert pass, not a GitHub workflow", ranAlerts === 1 && ALERT_CRON === "45 3 * * *");
+
+// ── v1.81 owner /promo ──────────────────────────────────────────────────
+check("/promo before a run explains", (await reply(om("/promo"), envO, fakeFetch)).text.includes("next Operator run"));
+await pushJson(envO, { promo: "🤝 Cross-promo kit" });
+check("/promo shows the kit the Operator pushed", (await reply(om("/promo"), envO, fakeFetch)).text.includes("Cross-promo kit"));
+check("the owner still gets /margin (not queued)", (await reply(om("/margin 549 180 0.4"), envO, fakeFetch)).text.includes("margin"));
 
 console.log(fails ? `\n${fails} FAILED` : "\nALL PASS");
 process.exit(fails ? 1 : 0);

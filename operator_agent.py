@@ -222,6 +222,9 @@ def todos(ctx):
         t.append(a)
     if ctx.get("savings_queue") == 0 and ctx.get("savings_on"):
         t.append("Queue tomorrow's savings offers: /deal <EarnKaro link> <one line> (2 a day)")
+    if ctx.get("tags_missing"):
+        t.append("Create tracking IDs in Associates Central for " + ", ".join(ctx["tags_missing"])
+                 + " and add them to AFF_TAGS — until then money cannot be split by channel or post type")
     rep_age = ctx.get("report_age")
     if rep_age is None or rep_age > 8:
         t.append("Send this week's Associates tracking-ID report to the bot as a file"
@@ -231,7 +234,8 @@ def todos(ctx):
             t.append(f"Pilot {p['pilot_id']}: {p['verdict']} → /pilot stop {p['pilot_id']}")
     aud = ctx.get("audience") or {}
     if aud.get("falling3"):
-        t.append("Members fell 3 nights running: drop one posting slot (AFF_SLOTS) before anything else changes")
+        t.append("Members fell 3 nights running: look at what was posted the day before each drop "
+                 "(posting frequency stays as you set it — AFF_SLOTS is your call)")
     for n in ctx.get("notes", []):
         if n.startswith("⚠️"):
             t.append(n[2:].strip())

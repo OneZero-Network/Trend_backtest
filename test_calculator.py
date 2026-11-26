@@ -99,8 +99,9 @@ else:
     v = openpyxl.load_workbook(path, data_only=True)[C.CALC_TAB]
     rr = {v[f"A{r}"].value or v[f"B{r}"].value: r for r in range(2, v.max_row + 1)}
     g = lambda key, k: v[f"{C.L[k]}{rr[key]}"].value
-    # A2 by hand: price 499, sourcing 150, electronics defaults: defect .03, ship 60, rto .08, ads .08, gst .18; referral override .05, closing 30
-    usable = 150 / .97; fees = 499 * .05 + 30; gst = 499 * .18 / 1.18 - usable * .18
+    # A2 by hand: price 499, sourcing 150, electronics defaults: defect .03, ship 60, rto .08, ads .08, gst .18; referral override .05,
+    # closing ₹23 (v1.81: 2026 band ₹301–500, highest published fee group)
+    usable = 150 / .97; fees = 499 * .05 + 23; gst = 499 * .18 / 1.18 - usable * .18
     rto = .08 / .92 * 60 * 2; ads = 499 * .08; total = usable + fees + gst + 60 + rto + ads; margin = (499 - total) / 499
     check("A2 margin matches hand calculation (override + electronics defaults, row moved)",
           abs(g("A2", "margin") - margin) < 1e-6, f"sheet {g('A2', 'margin'):.4f} vs hand {margin:.4f}")
@@ -149,7 +150,10 @@ class WS:
     def __init__(s): s.vals = []
     def get_all_values(s, value_render_option=None): return s.vals
     def clear(s): s.vals = []
-    def update(s, range_name=None, values=None, value_input_option=None): s.vals = [list(r) for r in values]
+    def update(s, range_name=None, values=None, value_input_option=None):
+        if range_name not in (None, "A1"):          # v1.81: the fee block is written at L2 and must not replace A:J
+            s.block = (range_name, values); return
+        s.vals = [list(r) for r in values]
 class WB:
     def __init__(s): s.tabs = {}
     def worksheet(s, n):

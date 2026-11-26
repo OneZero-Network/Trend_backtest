@@ -102,8 +102,9 @@ if skill:
     v = openpyxl.load_workbook(calc, data_only=True)[C.CALC_TAB]
     g = {v[f"A{r}"].value: r for r in range(2, v.max_row + 1)}
     em = v[f"{C.L['est_margin']}{g['B0LIGHTS01']}"].value
-    # hand: kitchen defaults defect .04, referral .10, closing 30, ship 80, rto .12, ads .08, gst .18, itc 1, ret 2
-    u = 110 / .96; fees = 499 * .10 + 30; gst = 499 * .18 / 1.18 - u * .18; rto = .12 / .88 * 80 * 2
+    # hand: kitchen defaults defect .04, ship 80, rto .12, ads .08, gst .18, itc 1, ret 2; v1.81 2026 fees at ₹499:
+    # referral 0% (under ₹1,000), closing ₹23 (₹301–500 band)
+    u = 110 / .96; fees = 499 * 0 + 23; gst = 499 * .18 / 1.18 - u * .18; rto = .12 / .88 * 80 * 2
     hand = (499 - (u + fees + gst + 80 + rto + 499 * .08)) / 499
     check("indicative margin matches hand calculation", abs(em - hand) < 1e-6, f"sheet {em:.4f} vs hand {hand:.4f}")
     tv = v[f"{C.L['est_verdict']}{g['B0LIGHTS01']}"].value

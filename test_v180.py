@@ -289,6 +289,6 @@ rows_none = run_at("2026-11-25", 15, tf.savings_slot, tf.affiliate_store(tf.Stor
 check("drip 15:00: not a savings slot → nothing", rows_none == [])
 vendor.Razorpay = _rz
 
-check("VERSION is 1.80", tf.VERSION == "1.80")
+check("VERSION is 1.80 or later", float(tf.VERSION) >= 1.80)
 print("\n" + ("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}"))
 sys.exit(1 if FAILS else 0)

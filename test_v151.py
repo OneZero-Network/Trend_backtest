@@ -223,7 +223,7 @@ check("copy: a momentum pick keeps its rank-move line and has no durable wording
 check("copy: no explainer sentence, no legend line, new title (v1.51 user feedback)",
       "Tap a name" not in msg and "tracked daily" not in msg and "🧱 =" not in msg and "Hidden Amazon Finds" not in msg
       and "bestseller lists today" not in picks.wa_bundle(batch, hist_c, "t", TODAY, cat_names={})[0]
-      and msg.startswith("🔍 <b>Amazon Hidden Bestsellers</b> — test\n\n1."), msg[:160])
+      and msg.startswith("🔍 <b>Amazon Hidden Bestsellers</b> — test · <i>#ad</i>\n\n1."), msg[:160])
 check("copy: durable line is short — rank, category, days, and no 'last' wording; icon is 🏆", "🏆 Home &amp; Kitchen · #12 · " in msg and len(next(l for l in msg.split("\n") if "🏆" in l)) < 60, msg)
 check("copy: no price, no 'best' / 'trending now' / forecast words in a durable post",
       not re.search(r"₹|\bbest\b|\bwill\b|\bhot\b|going viral|trending now", msg, re.I), msg)
